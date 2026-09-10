@@ -19,7 +19,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 ADMIN_SECRET_KEY = "mansour$vx"
 
 if not BOT_TOKEN:
-    print("[ERROR] BOT_TOKEN environment variable missing!", flush=True)
+    print("[ERROR] BOT_TOKEN missing!", flush=True)
     sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", disable_web_page_preview=True)
@@ -30,7 +30,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Bot is Running 24/7 on Neon Postgres")
+        self.wfile.write(b"Group Moderation Bot is Active 24/7 on Neon Postgres")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -79,11 +79,26 @@ def get_default_db_data():
         "warnings": {},
         "banned_words": [],
         "custom_replies": {},
+        "appeals": {},
         "settings": {
             "maintenance": False,
             "new_user_notify": True
         }
     }
+
+def save_db(data):
+    try:
+        json_payload = json.dumps(data, default=str)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO mod_bot_storage (key, data)
+                    VALUES ('main_config', %s)
+                    ON CONFLICT (key) DO UPDATE
+                    SET data = EXCLUDED.data;
+                """, (json_payload,))
+    except Exception as e:
+        print(f"[DATABASE ERROR] Save failed: {e}", flush=True)
 
 def load_db():
     default_data = get_default_db_data()
@@ -109,26 +124,13 @@ def load_db():
         print(f"[DATABASE ERROR] Load failed: {e}", flush=True)
         return default_data
 
-def save_db(data):
-    try:
-        json_payload = json.dumps(data, default=str)
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO mod_bot_storage (key, data)
-                    VALUES ('main_config', %s)
-                    ON CONFLICT (key) DO UPDATE
-                    SET data = EXCLUDED.data;
-                """, (json_payload,))
-    except Exception as e:
-        print(f"[DATABASE ERROR] Save failed: {e}", flush=True)
-
-# Non-blocking DB Initialization
 threading.Thread(target=init_postgres, daemon=True).start()
 db = load_db()
 
+# In-Memory Fast Cache
 admin_state = {}
 user_message_history = {}
+user_warn_cache = {}
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ----------------- HELPERS -----------------
@@ -177,6 +179,36 @@ def register_user(user, chat_id=None):
         db["users"][user_id]["username"] = f"@{user.username}" if user.username else "No Username"
         save_db(db)
 
+def get_target_user(message):
+    if message.reply_to_message:
+        return message.reply_to_message.from_user
+    args = message.text.split()
+    if len(args) > 1:
+        target_str = args[1].replace("@", "")
+        if target_str.isdigit():
+            try:
+                chat_member = bot.get_chat_member(message.chat.id, int(target_str))
+                return chat_member.user
+            except Exception:
+                return types.User(int(target_str), False, "User")
+        for u in db.get("users", {}).values():
+            if u.get("username", "").lower().replace("@", "") == target_str.lower():
+                return types.User(u["id"], False, u["name"], username=target_str)
+    return None
+
+def send_private_notice(user_id, group_name, action_type):
+    bot_user = bot.get_me().username
+    text = (
+        f"Hello,\n\nYou have been <b>{action_type}</b> in <b>{group_name}</b>.\n"
+        "If you believe this action was a mistake, you can submit an appeal using our official portal below."
+    )
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📝 Submit Appeal", url=f"https://t.me/{bot_user}?start=appeal"))
+    try:
+        bot.send_message(user_id, text, reply_markup=markup)
+    except Exception:
+        pass
+
 def get_admin_panel_markup():
     m_status = "ON" if db.get("settings", {}).get("maintenance", False) else "OFF"
     n_status = "ON" if db.get("settings", {}).get("new_user_notify", True) else "OFF"
@@ -194,7 +226,7 @@ def get_admin_panel_markup():
     )
     return markup
 
-# ----------------- ANTI-BOT ADD PROTECTION -----------------
+# ----------------- ANTI-BOT PROTECTION -----------------
 @bot.message_handler(content_types=['new_chat_members'])
 def handle_bot_addition(message):
     chat_id = message.chat.id
@@ -217,24 +249,24 @@ def handle_start(message):
     register_user(user, message.chat.id)
 
     parts = message.text.split()
-    if len(parts) > 1 and parts[1].startswith("appeal_"):
-        cid = parts[1].replace("appeal_", "")
-        admin_state[user.id] = f"user_appeal_{cid}"
-        bot.reply_to(message, "Ban/Mute Appeal Portal:\n\nType your explanation message below:")
+    if len(parts) > 1 and parts[1].startswith("appeal"):
+        admin_state[user.id] = "submitting_appeal"
+        bot.reply_to(message, "Ban/Mute Appeal Portal:\n\nType your explanation message below. It will be forwarded directly to the moderation team:")
         return
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("Submit Appeal", callback_data="u_appeal_menu"),
-        types.InlineKeyboardButton("Report User", callback_data="u_report_menu")
+        types.InlineKeyboardButton("📝 Submit Appeal", callback_data="u_appeal_menu"),
+        types.InlineKeyboardButton("🚨 Report User", callback_data="u_report_menu"),
+        types.InlineKeyboardButton("📊 My Status", callback_data="u_status_menu")
     )
-    bot.reply_to(message, f"Welcome {user.first_name} to the Group Support Desk.\nSelect an option:", reply_markup=markup)
+    bot.reply_to(message, f"Welcome {user.first_name} to the Group Support Desk.\nSelect an option below:", reply_markup=markup)
 
 @bot.message_handler(commands=['claim'], chat_types=['private'])
 def handle_claim_command(message):
     user_id = message.from_user.id
     if is_admin_or_owner(user_id):
-        bot.reply_to(message, "You are already authorized as an Admin. Send <code>/admin</code> to open dashboard.")
+        bot.reply_to(message, "You are already authorized as an Admin. Send <code>/admin</code> to open the dashboard.")
         return
 
     admin_state[user_id] = "waiting_claim_password"
@@ -254,14 +286,15 @@ def cmd_warn(message):
     if not is_group_admin(chat.id, message.from_user.id):
         return
 
-    if not message.reply_to_message:
-        bot.reply_to(message, "Reply to a user's message to warn them.")
+    target = get_target_user(message)
+    if not target:
+        bot.reply_to(message, "Usage: Reply to a user's message or use <code>/warn username/id</code>")
         return
 
-    target = message.reply_to_message.from_user
     key = f"{target.id}_{chat.id}"
     curr_warns = db.get("warnings", {}).get(key, 0) + 1
     db.setdefault("warnings", {})[key] = curr_warns
+    user_warn_cache[key] = curr_warns
     save_db(db)
 
     uname = f"@{target.username}" if target.username else target.first_name
@@ -272,19 +305,42 @@ def cmd_warn(message):
         bot.send_message(chat.id, f"{uname} [{target.id}] warned ({curr_warns} of 3).", reply_markup=markup)
     else:
         db["warnings"].pop(key, None)
+        user_warn_cache.pop(key, None)
         save_db(db)
         try:
-            bot.ban_chat_member(chat.id, target.id)
+            bot.restrict_chat_member(chat.id, target.id, can_send_messages=False)
         except Exception:
             pass
+
+        send_private_notice(target.id, chat.title, "muted (3 Warnings Reached)")
 
         bot_user = bot.get_me().username
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal_{chat.id}"),
-            types.InlineKeyboardButton("Unban", callback_data=f"act_unban_{target.id}_{chat.id}")
+            types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal"),
+            types.InlineKeyboardButton("Unmute", callback_data=f"act_unmute_{target.id}_{chat.id}")
         )
-        bot.send_message(chat.id, f"{uname} [{target.id}] banned.", reply_markup=markup)
+        bot.send_message(chat.id, f"{uname} [{target.id}] has been muted (3 Warnings Reached).", reply_markup=markup)
+
+@bot.message_handler(commands=['unwarn'], chat_types=['group', 'supergroup'])
+def cmd_unwarn(message):
+    chat = message.chat
+    if not is_group_admin(chat.id, message.from_user.id):
+        return
+
+    target = get_target_user(message)
+    if not target:
+        bot.reply_to(message, "Usage: Reply to a user's message or use <code>/unwarn username/id</code>")
+        return
+
+    key = f"{target.id}_{chat.id}"
+    curr_warns = max(0, db.get("warnings", {}).get(key, 0) - 1)
+    db.setdefault("warnings", {})[key] = curr_warns
+    user_warn_cache[key] = curr_warns
+    save_db(db)
+
+    uname = f"@{target.username}" if target.username else target.first_name
+    bot.send_message(chat.id, f"Warning removed for {uname} [{target.id}]. Current warnings: ({curr_warns} of 3).")
 
 @bot.message_handler(commands=['mute'], chat_types=['group', 'supergroup'])
 def cmd_mute(message):
@@ -292,22 +348,44 @@ def cmd_mute(message):
     if not is_group_admin(chat.id, message.from_user.id):
         return
 
-    if not message.reply_to_message:
-        bot.reply_to(message, "Reply to a user's message to mute them.")
+    target = get_target_user(message)
+    if not target:
+        bot.reply_to(message, "Usage: Reply to a user's message or use <code>/mute username/id</code>")
         return
 
-    target = message.reply_to_message.from_user
     uname = f"@{target.username}" if target.username else target.first_name
-
     try:
         bot.restrict_chat_member(chat.id, target.id, can_send_messages=False)
+        send_private_notice(target.id, chat.title, "muted")
+
         bot_user = bot.get_me().username
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal_{chat.id}"),
+            types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal"),
             types.InlineKeyboardButton("Unmute", callback_data=f"act_unmute_{target.id}_{chat.id}")
         )
         bot.send_message(chat.id, f"{uname} [{target.id}] has been muted.", reply_markup=markup)
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+@bot.message_handler(commands=['unmute'], chat_types=['group', 'supergroup'])
+def cmd_unmute(message):
+    chat = message.chat
+    if not is_group_admin(chat.id, message.from_user.id):
+        return
+
+    target = get_target_user(message)
+    if not target:
+        bot.reply_to(message, "Usage: Reply to a user's message or use <code>/unmute username/id</code>")
+        return
+
+    uname = f"@{target.username}" if target.username else target.first_name
+    try:
+        bot.restrict_chat_member(
+            chat.id, target.id,
+            can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True
+        )
+        bot.send_message(chat.id, f"{uname} [{target.id}] has been unmuted.")
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
 
@@ -317,26 +395,59 @@ def cmd_ban(message):
     if not is_group_admin(chat.id, message.from_user.id):
         return
 
-    if not message.reply_to_message:
-        bot.reply_to(message, "Reply to a user's message to ban them.")
+    target = get_target_user(message)
+    if not target:
+        bot.reply_to(message, "Usage: Reply to a user's message or use <code>/ban username/id</code>")
         return
 
-    target = message.reply_to_message.from_user
     uname = f"@{target.username}" if target.username else target.first_name
-
     try:
         bot.ban_chat_member(chat.id, target.id)
-        bot_user = bot.get_me().username
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal_{chat.id}"),
-            types.InlineKeyboardButton("Unban", callback_data=f"act_unban_{target.id}_{chat.id}")
-        )
+        send_private_notice(target.id, chat.title, "banned")
+
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Unban", callback_data=f"act_unban_{target.id}_{chat.id}"))
         bot.send_message(chat.id, f"{uname} [{target.id}] banned.", reply_markup=markup)
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
 
-# ----------------- GROUP MODERATION & ANTI-SPAM -----------------
+@bot.message_handler(commands=['unban'], chat_types=['group', 'supergroup'])
+def cmd_unban(message):
+    chat = message.chat
+    if not is_group_admin(chat.id, message.from_user.id):
+        return
+
+    target = get_target_user(message)
+    if not target:
+        bot.reply_to(message, "Usage: Reply to a user's message or use <code>/unban username/id</code>")
+        return
+
+    uname = f"@{target.username}" if target.username else target.first_name
+    try:
+        bot.unban_chat_member(chat.id, target.id, only_if_banned=True)
+        bot.send_message(chat.id, f"{uname} [{target.id}] has been unbanned.")
+    except Exception as e:
+        bot.reply_to(message, f"Error: {e}")
+
+@bot.message_handler(commands=['info'], chat_types=['group', 'supergroup'])
+def cmd_info(message):
+    target = get_target_user(message) or message.from_user
+    key = f"{target.id}_{message.chat.id}"
+    warn_count = db.get("warnings", {}).get(key, 0)
+    u_info = db.get("users", {}).get(str(target.id), {})
+    joined = u_info.get("joined_at", "N/A")
+
+    info_text = (
+        "User Information:\n\n"
+        f"• Name: {target.first_name}\n"
+        f"• User ID: <code>{target.id}</code>\n"
+        f"• Username: @{target.username if target.username else 'None'}\n"
+        f"• Current Warnings: <code>{warn_count}/3</code>\n"
+        f"• First Seen: <code>{joined}</code>"
+    )
+    bot.reply_to(message, info_text)
+
+# ----------------- GROUP MODERATION & HIGH-SPEED ANTI-SPAM -----------------
 @bot.message_handler(chat_types=['group', 'supergroup'], content_types=['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation'])
 def handle_group_moderation(message):
     user = message.from_user
@@ -384,23 +495,26 @@ def handle_group_moderation(message):
             except Exception:
                 pass
 
-    # 4. Anti-Flood System (10s window, max 3 messages)
+    # 4. Ultra-Fast Anti-Flood System (4th message deleted instantly)
     now = time.time()
     user_history = user_message_history.setdefault(user.id, [])
     user_history.append(now)
     user_message_history[user.id] = [t for t in user_history if now - t <= 10]
 
-    if len(user_message_history[user.id]) > 3:
+    if len(user_message_history[user.id]) >= 4:
         try:
             bot.delete_message(chat.id, message.message_id)
         except Exception:
             pass
 
         key = f"{user.id}_{chat.id}"
-        curr_warns = db.get("warnings", {}).get(key, 0) + 1
+        curr_warns = user_warn_cache.get(key, db.get("warnings", {}).get(key, 0)) + 1
+        user_warn_cache[key] = curr_warns
         db.setdefault("warnings", {})[key] = curr_warns
         save_db(db)
 
+        # Clear history to avoid multi-warn triggers on continuous typing
+        user_message_history[user.id] = []
         uname = f"@{user.username}" if user.username else user.first_name
 
         if curr_warns < 3:
@@ -409,21 +523,24 @@ def handle_group_moderation(message):
             bot.send_message(chat.id, f"{uname} [{user.id}] warned ({curr_warns} of 3).", reply_markup=markup)
         else:
             db["warnings"].pop(key, None)
+            user_warn_cache.pop(key, None)
             save_db(db)
             try:
-                bot.ban_chat_member(chat.id, user.id)
+                bot.restrict_chat_member(chat.id, user.id, can_send_messages=False)
             except Exception:
                 pass
+
+            send_private_notice(user.id, chat.title, "muted (3 Warnings Reached)")
 
             bot_user = bot.get_me().username
             markup = types.InlineKeyboardMarkup(row_width=2)
             markup.add(
-                types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal_{chat.id}"),
-                types.InlineKeyboardButton("Unban", callback_data=f"act_unban_{user.id}_{chat.id}")
+                types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal"),
+                types.InlineKeyboardButton("Unmute", callback_data=f"act_unmute_{user.id}_{chat.id}")
             )
-            bot.send_message(chat.id, f"{uname} [{user.id}] banned.", reply_markup=markup)
+            bot.send_message(chat.id, f"{uname} [{user.id}] has been muted (3 Warnings Reached).", reply_markup=markup)
 
-# ----------------- PRIVATE DIALOGUE / CLAIM INPUT HANDLER -----------------
+# ----------------- PRIVATE DIALOGUE / FORM HANDLER -----------------
 @bot.message_handler(chat_types=['private'], content_types=['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation'])
 def handle_private_dialogue(message):
     user_id = message.from_user.id
@@ -450,13 +567,23 @@ def handle_private_dialogue(message):
             bot.reply_to(message, "Incorrect Password. Access Denied.")
         return
 
-    if state.startswith("user_appeal_"):
-        cid = state.replace("user_appeal_", "")
+    if state == "submitting_appeal":
         admin_state.pop(user_id, None)
+        appeal_id = str(int(time.time()))
+        db.setdefault("appeals", {})[appeal_id] = {
+            "user_id": user_id,
+            "name": message.from_user.first_name,
+            "username": message.from_user.username,
+            "text": text,
+            "status": "Pending",
+            "time": get_full_timestamp()
+        }
+        save_db(db)
+
         alert = (
-            "New Appeal Submitted:\n\n"
+            f"New Appeal Received [ID: <code>{appeal_id}</code>]:\n\n"
             f"User: {message.from_user.first_name} (@{message.from_user.username}) [ID: <code>{user_id}</code>]\n"
-            f"Group ID: <code>{cid}</code>\n\n"
+            f"Date: <code>{get_full_timestamp()}</code>\n\n"
             f"Appeal Note:\n{text}"
         )
         for adm in db.get("admins", []):
@@ -464,7 +591,23 @@ def handle_private_dialogue(message):
                 bot.send_message(adm, alert)
             except Exception:
                 pass
-        bot.reply_to(message, "Your appeal has been received and forwarded to group admins.")
+        bot.reply_to(message, "Your appeal has been successfully submitted and forwarded to admins for review.")
+        return
+
+    if state == "submitting_report":
+        admin_state.pop(user_id, None)
+        alert = (
+            "New User Report Received:\n\n"
+            f"Reported by: {message.from_user.first_name} [ID: <code>{user_id}</code>]\n"
+            f"Date: <code>{get_full_timestamp()}</code>\n\n"
+            f"Details:\n{text}"
+        )
+        for adm in db.get("admins", []):
+            try:
+                bot.send_message(adm, alert)
+            except Exception:
+                pass
+        bot.reply_to(message, "Report has been submitted to the moderation team. Thank you.")
         return
 
     if state == "add_banned_word":
@@ -541,6 +684,39 @@ def handle_all_callbacks(call):
     user_id = call.from_user.id
     data = call.data
 
+    # User Dashboard Actions
+    if data == "u_appeal_menu":
+        admin_state[user_id] = "submitting_appeal"
+        bot.send_message(call.message.chat.id, "Please write your appeal details below:")
+        return
+
+    if data == "u_report_menu":
+        admin_state[user_id] = "submitting_report"
+        bot.send_message(call.message.chat.id, "Please send the User ID/Username and description of the issue to report:")
+        return
+
+    if data == "u_status_menu":
+        active_warns = []
+        for k, v in db.get("warnings", {}).items():
+            if k.startswith(f"{user_id}_"):
+                cid = k.split("_")[1]
+                gtitle = db.get("groups", {}).get(cid, {}).get("title", f"Group {cid}")
+                active_warns.append(f"• {gtitle}: <code>{v}/3 Warns</code>")
+
+        appeals_list = [f"• ID: {aid} ({adata['status']})" for aid, adata in db.get("appeals", {}).items() if adata.get("user_id") == user_id]
+        
+        warns_str = "\n".join(active_warns) if active_warns else "• No active warnings."
+        appeals_str = "\n".join(appeals_list) if appeals_list else "• No pending appeals."
+
+        status_card = (
+            "Your Account Status:\n\n"
+            f"<b>Active Warnings:</b>\n{warns_str}\n\n"
+            f"<b>Submitted Appeals:</b>\n{appeals_str}"
+        )
+        bot.send_message(call.message.chat.id, status_card)
+        return
+
+    # Group Warn Adjustment
     if data.startswith("warn_opt_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
@@ -562,6 +738,7 @@ def handle_all_callbacks(call):
         key = f"{target_uid}_{target_cid}"
         count = db.get("warnings", {}).get(key, 0) + 1
         db.setdefault("warnings", {})[key] = count
+        user_warn_cache[key] = count
         save_db(db)
         bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
         return
@@ -573,10 +750,12 @@ def handle_all_callbacks(call):
         key = f"{target_uid}_{target_cid}"
         count = max(0, db.get("warnings", {}).get(key, 0) - 1)
         db.setdefault("warnings", {})[key] = count
+        user_warn_cache[key] = count
         save_db(db)
         bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
         return
 
+    # Unban / Unmute Group Controls
     if data.startswith("act_unban_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
@@ -604,6 +783,7 @@ def handle_all_callbacks(call):
             bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
         return
 
+    # Admin Control Panel Callbacks
     if not is_admin_or_owner(user_id):
         bot.answer_callback_query(call.id, "Access Denied.")
         return
@@ -617,10 +797,12 @@ def handle_all_callbacks(call):
         g_len = len(db.get("groups", {}))
         w_len = len(db.get("banned_words", []))
         c_len = len(db.get("custom_replies", {}))
+        a_len = len(db.get("appeals", {}))
         stats_text = (
             "Bot Real-time Analytics:\n\n"
             f"• Registered Users: <code>{u_len}</code>\n"
             f"• Active Groups: <code>{g_len}</code>\n"
+            f"• Total Appeals Logged: <code>{a_len}</code>\n"
             f"• Banned Words: <code>{w_len}</code>\n"
             f"• Custom Replies: <code>{c_len}</code>\n"
             f"• Storage: <code>Neon Postgres JSONB (Lifetime)</code>"
