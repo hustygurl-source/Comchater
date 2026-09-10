@@ -1,14 +1,13 @@
 import os
 import sys
 import time
-import json
 import re
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 from datetime import datetime, timezone, timedelta
-import psycopg2
+import database as db_engine
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -32,110 +31,24 @@ def run_server():
     try:
         port = int(os.environ.get("PORT", 8080))
         server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        print(f"[SERVER] Health check active on port {port}", flush=True)
+        print(f"[SERVER] Health check server active on port {port}", flush=True)
         server.serve_forever()
     except Exception as e:
         print(f"[SERVER ERROR] Crashed: {e}", flush=True)
 
 threading.Thread(target=run_server, daemon=True).start()
 
-# ----------------- CONFIGURATION -----------------
+# ----------------- INITIALIZE BOT & DATABASE -----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DATABASE_URL = os.environ.get("DATABASE_URL")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", disable_web_page_preview=True)
 
-db_lock = threading.Lock()
+db_engine.init_db()
+db = db_engine.load_db()
+
 admin_state = {}
 user_message_history = {}
-
-# ----------------- NEON POSTGRESQL ENGINE (JSONB LIFETIME STORAGE) -----------------
-def get_db_connection():
-    clean_url = DATABASE_URL.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
-    return psycopg2.connect(clean_url, sslmode="require", connect_timeout=10)
-
-def init_postgres():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS mod_bot_storage (
-                key VARCHAR(50) PRIMARY KEY,
-                data JSONB NOT NULL
-            );
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("[DATABASE] Neon PostgreSQL Initialized Successfully!", flush=True)
-    except Exception as e:
-        print(f"[DATABASE ERROR] Init failed: {e}", flush=True)
-
-init_postgres()
-
-def get_default_db_data():
-    return {
-        "_id": "mod_config",
-        "admins": [OWNER_ID] if OWNER_ID else [],
-        "users": {},
-        "groups": {},
-        "warnings": {},
-        "banned_words": [],
-        "custom_replies": {},
-        "settings": {
-            "maintenance": False,
-            "new_user_notify": True
-        }
-    }
-
-def load_db():
-    default_data = get_default_db_data()
-    with db_lock:
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT data FROM mod_bot_storage WHERE key = 'main_config';")
-            row = cur.fetchone()
-            cur.close()
-            conn.close()
-
-            if row and row[0]:
-                data = row[0]
-                if isinstance(data, str):
-                    data = json.loads(data)
-                for k, v in default_data.items():
-                    if k not in data:
-                        data[k] = v
-                if OWNER_ID and OWNER_ID not in data.get("admins", []):
-                    data.setdefault("admins", []).append(OWNER_ID)
-                return data
-            else:
-                save_db(default_data)
-                return default_data
-        except Exception as e:
-            print(f"[DATABASE ERROR] Load failed: {e}", flush=True)
-            return default_data
-
-def save_db(data):
-    with db_lock:
-        try:
-            json_payload = json.dumps(data, default=str)
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO mod_bot_storage (key, data)
-                VALUES ('main_config', %s)
-                ON CONFLICT (key) DO UPDATE
-                SET data = EXCLUDED.data;
-            """, (json_payload,))
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print(f"[DATABASE ERROR] Save failed: {e}", flush=True)
-
-db = load_db()
 
 # ----------------- HELPERS -----------------
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -164,7 +77,7 @@ def register_user(user, chat_id=None):
             "username": f"@{user.username}" if user.username else "No Username",
             "joined_at": get_full_timestamp()
         }
-        save_db(db)
+        db_engine.save_db(db)
 
         if db.get("settings", {}).get("new_user_notify", True):
             u_tag = f"@{user.username}" if user.username else "None"
@@ -183,7 +96,7 @@ def register_user(user, chat_id=None):
     else:
         db["users"][user_id]["name"] = user.first_name or "Unknown"
         db["users"][user_id]["username"] = f"@{user.username}" if user.username else "No Username"
-        save_db(db)
+        db_engine.save_db(db)
 
 # ----------------- UI MARKUPS -----------------
 def get_admin_panel_markup():
@@ -231,10 +144,9 @@ def handle_all_messages(message):
         process_private_dialogue(message)
         return
 
-    # Track Group in Database
     if str(chat.id) not in db.get("groups", {}):
         db.setdefault("groups", {})[str(chat.id)] = {"id": chat.id, "title": chat.title}
-        save_db(db)
+        db_engine.save_db(db)
 
     is_user_adm = is_group_admin(chat.id, user.id)
 
@@ -285,7 +197,7 @@ def handle_all_messages(message):
         key = f"{user.id}_{chat.id}"
         curr_warns = db.get("warnings", {}).get(key, 0) + 1
         db.setdefault("warnings", {})[key] = curr_warns
-        save_db(db)
+        db_engine.save_db(db)
 
         uname = f"@{user.username}" if user.username else user.first_name
 
@@ -295,7 +207,7 @@ def handle_all_messages(message):
             bot.send_message(chat.id, f"{uname} [{user.id}] warned ({curr_warns} of 3).", reply_markup=markup)
         else:
             db["warnings"].pop(key, None)
-            save_db(db)
+            db_engine.save_db(db)
             try:
                 bot.ban_chat_member(chat.id, user.id)
             except Exception:
@@ -309,7 +221,7 @@ def handle_all_messages(message):
             )
             bot.send_message(chat.id, f"{uname} [{user.id}] banned.", reply_markup=markup)
 
-# ----------------- GROUP MODERATION COMMANDS -----------------
+# ----------------- MANUAL COMMANDS -----------------
 @bot.message_handler(commands=['warn'])
 def cmd_warn(message):
     chat = message.chat
@@ -324,7 +236,7 @@ def cmd_warn(message):
     key = f"{target.id}_{chat.id}"
     curr_warns = db.get("warnings", {}).get(key, 0) + 1
     db.setdefault("warnings", {})[key] = curr_warns
-    save_db(db)
+    db_engine.save_db(db)
 
     uname = f"@{target.username}" if target.username else target.first_name
 
@@ -334,7 +246,7 @@ def cmd_warn(message):
         bot.send_message(chat.id, f"{uname} [{target.id}] warned ({curr_warns} of 3).", reply_markup=markup)
     else:
         db["warnings"].pop(key, None)
-        save_db(db)
+        db_engine.save_db(db)
         try:
             bot.ban_chat_member(chat.id, target.id)
         except Exception:
@@ -398,7 +310,7 @@ def cmd_ban(message):
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
 
-# ----------------- PRIVATE COMMANDS & HANDLERS -----------------
+# ----------------- PRIVATE COMMANDS -----------------
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if message.chat.type != "private":
@@ -411,7 +323,7 @@ def handle_start(message):
     if len(parts) > 1 and parts[1].startswith("appeal_"):
         cid = parts[1].replace("appeal_", "")
         admin_state[user.id] = f"user_appeal_{cid}"
-        bot.reply_to(message, "Ban/Mute Appeal Portal:\n\nType your explanation message below. It will be forwarded directly to the moderation team:")
+        bot.reply_to(message, "Ban/Mute Appeal Portal:\n\nType your explanation message below:")
         return
 
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -427,13 +339,12 @@ def handle_admin_command(message):
         return
     bot.reply_to(message, "Administrator Control Panel\nSelect an action from the options below:", reply_markup=get_admin_panel_markup())
 
-# ----------------- CALLBACK HANDLER -----------------
+# ----------------- CALLBACK QUERY HANDLER -----------------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
     user_id = call.from_user.id
     data = call.data
 
-    # Warn Adjustments
     if data.startswith("warn_opt_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
@@ -455,7 +366,7 @@ def handle_all_callbacks(call):
         key = f"{target_uid}_{target_cid}"
         count = db.get("warnings", {}).get(key, 0) + 1
         db.setdefault("warnings", {})[key] = count
-        save_db(db)
+        db_engine.save_db(db)
         bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
         return
 
@@ -466,11 +377,10 @@ def handle_all_callbacks(call):
         key = f"{target_uid}_{target_cid}"
         count = max(0, db.get("warnings", {}).get(key, 0) - 1)
         db.setdefault("warnings", {})[key] = count
-        save_db(db)
+        db_engine.save_db(db)
         bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
         return
 
-    # Unban / Unmute
     if data.startswith("act_unban_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
@@ -498,7 +408,6 @@ def handle_all_callbacks(call):
             bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
         return
 
-    # Admin Control Panel Callbacks
     if not is_admin_or_owner(user_id):
         bot.answer_callback_query(call.id, "Access Denied.")
         return
@@ -562,14 +471,14 @@ def handle_all_callbacks(call):
     if data == "toggle_maintenance":
         curr = db.setdefault("settings", {}).get("maintenance", False)
         db["settings"]["maintenance"] = not curr
-        save_db(db)
+        db_engine.save_db(db)
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
     if data == "toggle_notify":
         curr = db.setdefault("settings", {}).get("new_user_notify", True)
         db["settings"]["new_user_notify"] = not curr
-        save_db(db)
+        db_engine.save_db(db)
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
@@ -617,7 +526,7 @@ def process_private_dialogue(message):
         w = text.lower().strip()
         if w and w not in db.get("banned_words", []):
             db.setdefault("banned_words", []).append(w)
-            save_db(db)
+            db_engine.save_db(db)
         bot.reply_to(message, f"Word '{w}' added to banned words blacklist.", reply_markup=get_admin_panel_markup())
         return
 
@@ -648,7 +557,7 @@ def process_private_dialogue(message):
             "btn_name": btn_name,
             "btn_url": btn_url
         }
-        save_db(db)
+        db_engine.save_db(db)
         bot.reply_to(message, "Custom auto-reply configured successfully.", reply_markup=get_admin_panel_markup())
         return
 
