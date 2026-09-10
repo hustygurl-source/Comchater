@@ -38,9 +38,10 @@ def run_server():
 
 threading.Thread(target=run_server, daemon=True).start()
 
-# ----------------- CONFIGURATION -----------------
+# ----------------- CONFIGURATION & CONSTANTS -----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+ADMIN_SECRET_KEY = "mansour$vx"
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", disable_web_page_preview=True)
 
@@ -129,7 +130,7 @@ def handle_bot_addition(message):
                 except Exception:
                     pass
 
-# ----------------- PRIVATE COMMANDS -----------------
+# ----------------- PRIVATE COMMANDS (/start, /claim, /admin) -----------------
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def handle_start(message):
     user = message.from_user
@@ -149,9 +150,20 @@ def handle_start(message):
     )
     bot.reply_to(message, f"Welcome {user.first_name} to the Group Support Desk.\nSelect an option:", reply_markup=markup)
 
+@bot.message_handler(commands=['claim'], chat_types=['private'])
+def handle_claim_command(message):
+    user_id = message.from_user.id
+    if is_admin_or_owner(user_id):
+        bot.reply_to(message, "You are already authorized as an Admin. Send <code>/admin</code> to open the dashboard.")
+        return
+
+    admin_state[user_id] = "waiting_claim_password"
+    bot.reply_to(message, "Secret Access Verification Required:\n\nPlease enter the secret admin key to claim access:")
+
 @bot.message_handler(commands=['admin'], chat_types=['private'])
 def handle_admin_command(message):
     if not is_admin_or_owner(message.from_user.id):
+        bot.reply_to(message, "Access Denied. Send <code>/claim</code> to authenticate first.")
         return
     bot.reply_to(message, "Administrator Control Panel\nSelect an action from the options below:", reply_markup=get_admin_panel_markup())
 
@@ -331,7 +343,7 @@ def handle_group_moderation(message):
             )
             bot.send_message(chat.id, f"{uname} [{user.id}] banned.", reply_markup=markup)
 
-# ----------------- PRIVATE CONVERSATION & FORM INPUTS -----------------
+# ----------------- PRIVATE DIALOGUE / CLAIM INPUT HANDLER -----------------
 @bot.message_handler(chat_types=['private'], content_types=['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation'])
 def handle_private_dialogue(message):
     user_id = message.from_user.id
@@ -339,6 +351,23 @@ def handle_private_dialogue(message):
     text = message.text or ""
 
     if not state:
+        return
+
+    if state == "waiting_claim_password":
+        admin_state.pop(user_id, None)
+        entered_pass = text.strip()
+
+        if entered_pass == ADMIN_SECRET_KEY:
+            if user_id not in db.setdefault("admins", []):
+                db["admins"].append(user_id)
+                db_engine.save_db(db)
+            bot.reply_to(
+                message,
+                "Admin Password Verified.\nYou are now authorized as Master Admin. Use <code>/admin</code> to open your dashboard.",
+                reply_markup=get_admin_panel_markup()
+            )
+        else:
+            bot.reply_to(message, "Incorrect Password. Access Denied.")
         return
 
     if state.startswith("user_appeal_"):
@@ -582,9 +611,9 @@ def handle_all_callbacks(call):
         bot.edit_message_text("Administrator Control Panel\nSelect an action from the options below:", call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
-# ----------------- MAIN RUNNER -----------------
+# ----------------- MAIN POLLING RUNNER -----------------
 if __name__ == "__main__":
-    print("[BOT] Starting Polling safely...", flush=True)
+    print("[BOT] Starting Telegram polling cleanly...", flush=True)
     try:
         bot.remove_webhook()
     except Exception:
