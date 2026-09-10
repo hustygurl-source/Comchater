@@ -243,7 +243,7 @@ def send_with_optional_media(chat_id, media_key, text, reply_markup=None):
                     pass
     bot.send_message(chat_id, text, reply_markup=reply_markup)
 
-# ----------------- MENUS -----------------
+# ----------------- UI MARKUPS -----------------
 def get_user_main_markup():
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -280,7 +280,7 @@ def get_admin_panel_markup():
     )
     return markup
 
-# ----------------- ANTI-BOT AUTO-PROTECTION -----------------
+# ----------------- ANTI-BOT ADD PROTECTION -----------------
 @bot.message_handler(content_types=['new_chat_members'])
 def handle_bot_addition(message):
     chat_id = message.chat.id
@@ -1033,7 +1033,7 @@ def handle_all_callbacks(call):
         bot.edit_message_text("Select a word below to remove from blacklist:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
-    # Manage Media Submenu (Image 3 Style)
+    # Manage Media Submenu
     if data == "adm_media_menu":
         m = db.get("media", {})
         s_m = "Set" if m.get("start") else "None"
@@ -1072,7 +1072,6 @@ def handle_all_callbacks(call):
         db["media"] = {"start": None, "ban": None, "mute": None, "warn": None}
         save_db(db)
         bot.answer_callback_query(call.id, "All command media has been reset.")
-        # Reload media menu
         media_text = (
             "<b>Manage Command Media (Photo / Video / GIF):</b>\n\n"
             "• Start Media: <code>None</code>\n"
@@ -1113,4 +1112,47 @@ def handle_all_callbacks(call):
         return
 
     if data == "adm_custom_replies":
-        admin_state[user_id] =
+        admin_state[user_id] = "cr_step1_trigger"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_back"))
+        bot.edit_message_text("Custom Reply Setup:\n\nStep 1: Send the trigger word or phrase:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "toggle_maintenance":
+        curr = db.setdefault("settings", {}).get("maintenance", False)
+        db["settings"]["maintenance"] = not curr
+        save_db(db)
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
+        return
+
+    if data == "toggle_notify":
+        curr = db.setdefault("settings", {}).get("new_user_notify", True)
+        db["settings"]["new_user_notify"] = not curr
+        save_db(db)
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
+        return
+
+    if data == "adm_manage_list":
+        adms = db.get("admins", [])
+        lines = [f"• <code>{a}</code>" for a in adms]
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_back"))
+        bot.edit_message_text("<b>Authorized Administrators:</b>\n\n" + "\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_back":
+        admin_state.pop(user_id, None)
+        bot.edit_message_text("<b>Administrator Control Panel</b>\nChoose a category below to manage settings:", call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
+        return
+
+# ----------------- ENTRYPOINT & POLLING -----------------
+if __name__ == "__main__":
+    try:
+        me = bot.get_me()
+        print(f"[BOT] Connected successfully as @{me.username} (ID: {me.id})", flush=True)
+        bot.remove_webhook()
+        setup_bot_commands()
+        time.sleep(1)
+        bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+    except Exception as e:
+        print(f"[BOT FATAL ERROR] {e}", flush=True)
