@@ -12,13 +12,25 @@ import psycopg
 
 sys.stdout.reconfigure(line_buffering=True)
 
+# ----------------- CONFIGURATION -----------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+ADMIN_SECRET_KEY = "mansour$vx"
+
+if not BOT_TOKEN:
+    print("[ERROR] BOT_TOKEN environment variable missing!", flush=True)
+    sys.exit(1)
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", disable_web_page_preview=True)
+
 # ----------------- 24/7 WEB SERVER FOR RENDER -----------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Group Moderation Bot is Active 24/7 on Neon Postgres")
+        self.wfile.write(b"Bot is Running 24/7 on Neon Postgres")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -39,19 +51,6 @@ def run_server():
 
 threading.Thread(target=run_server, daemon=True).start()
 
-# ----------------- CONFIGURATION -----------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-ADMIN_SECRET_KEY = "mansour$vx"
-
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", disable_web_page_preview=True)
-
-db_lock = threading.Lock()
-admin_state = {}
-user_message_history = {}
-IST = timezone(timedelta(hours=5, minutes=30))
-
 # ----------------- DATABASE ENGINE -----------------
 def get_db_connection():
     clean_url = DATABASE_URL.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
@@ -71,8 +70,6 @@ def init_postgres():
     except Exception as e:
         print(f"[DATABASE ERROR] Init failed: {e}", flush=True)
 
-init_postgres()
-
 def get_default_db_data():
     return {
         "_id": "mod_config",
@@ -90,45 +87,49 @@ def get_default_db_data():
 
 def load_db():
     default_data = get_default_db_data()
-    with db_lock:
-        try:
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT data FROM mod_bot_storage WHERE key = 'main_config';")
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        data = row[0]
-                        if isinstance(data, str):
-                            data = json.loads(data)
-                        for k, v in default_data.items():
-                            if k not in data:
-                                data[k] = v
-                        if OWNER_ID and OWNER_ID not in data.get("admins", []):
-                            data.setdefault("admins", []).append(OWNER_ID)
-                        return data
-                    else:
-                        save_db(default_data)
-                        return default_data
-        except Exception as e:
-            print(f"[DATABASE ERROR] Load failed: {e}", flush=True)
-            return default_data
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT data FROM mod_bot_storage WHERE key = 'main_config';")
+                row = cur.fetchone()
+                if row and row[0]:
+                    data = row[0]
+                    if isinstance(data, str):
+                        data = json.loads(data)
+                    for k, v in default_data.items():
+                        if k not in data:
+                            data[k] = v
+                    if OWNER_ID and OWNER_ID not in data.get("admins", []):
+                        data.setdefault("admins", []).append(OWNER_ID)
+                    return data
+                else:
+                    save_db(default_data)
+                    return default_data
+    except Exception as e:
+        print(f"[DATABASE ERROR] Load failed: {e}", flush=True)
+        return default_data
 
 def save_db(data):
-    with db_lock:
-        try:
-            json_payload = json.dumps(data, default=str)
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO mod_bot_storage (key, data)
-                        VALUES ('main_config', %s)
-                        ON CONFLICT (key) DO UPDATE
-                        SET data = EXCLUDED.data;
-                    """, (json_payload,))
-        except Exception as e:
-            print(f"[DATABASE ERROR] Save failed: {e}", flush=True)
+    try:
+        json_payload = json.dumps(data, default=str)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO mod_bot_storage (key, data)
+                    VALUES ('main_config', %s)
+                    ON CONFLICT (key) DO UPDATE
+                    SET data = EXCLUDED.data;
+                """, (json_payload,))
+    except Exception as e:
+        print(f"[DATABASE ERROR] Save failed: {e}", flush=True)
 
+# Non-blocking DB Initialization
+threading.Thread(target=init_postgres, daemon=True).start()
 db = load_db()
+
+admin_state = {}
+user_message_history = {}
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # ----------------- HELPERS -----------------
 def get_full_timestamp():
@@ -690,17 +691,13 @@ def handle_all_callbacks(call):
         bot.edit_message_text("Administrator Control Panel\nSelect an action from the options below:", call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
-# ----------------- MAIN RUNNER -----------------
-def run_bot_polling():
-    while True:
-        try:
-            print("[BOT] Starting Telegram polling cleanly...", flush=True)
-            bot.remove_webhook()
-            time.sleep(2)
-            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
-        except Exception as e:
-            print(f"[BOT ERROR] Polling interrupted: {e}. Retrying in 5s...", flush=True)
-            time.sleep(5)
-
+# ----------------- ENTRYPOINT & POLLING -----------------
 if __name__ == "__main__":
-    run_bot_polling()
+    try:
+        me = bot.get_me()
+        print(f"[BOT] Connected successfully as @{me.username} (ID: {me.id})", flush=True)
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+    except Exception as e:
+        print(f"[BOT FATAL ERROR] {e}", flush=True)
