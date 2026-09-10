@@ -1,13 +1,14 @@
 import os
 import sys
 import time
+import json
 import re
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 from datetime import datetime, timezone, timedelta
-import database as db_engine
+import psycopg
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -17,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Bot is Active 24/7 on Neon Postgres")
+        self.wfile.write(b"Group Moderation Bot is Active 24/7 on Neon Postgres")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -38,20 +39,98 @@ def run_server():
 
 threading.Thread(target=run_server, daemon=True).start()
 
-# ----------------- CONFIGURATION & CONSTANTS -----------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# ----------------- CONFIGURATION -----------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 ADMIN_SECRET_KEY = "mansour$vx"
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", disable_web_page_preview=True)
 
-db_engine.init_db()
-db = db_engine.load_db()
-
+db_lock = threading.Lock()
 admin_state = {}
 user_message_history = {}
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# ----------------- DATABASE ENGINE -----------------
+def get_db_connection():
+    clean_url = DATABASE_URL.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
+    return psycopg.connect(clean_url, autocommit=True, connect_timeout=10)
+
+def init_postgres():
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS mod_bot_storage (
+                        key VARCHAR(50) PRIMARY KEY,
+                        data JSONB NOT NULL
+                    );
+                """)
+        print("[DATABASE] Schema Verified & Ready!", flush=True)
+    except Exception as e:
+        print(f"[DATABASE ERROR] Init failed: {e}", flush=True)
+
+init_postgres()
+
+def get_default_db_data():
+    return {
+        "_id": "mod_config",
+        "admins": [OWNER_ID] if OWNER_ID else [],
+        "users": {},
+        "groups": {},
+        "warnings": {},
+        "banned_words": [],
+        "custom_replies": {},
+        "settings": {
+            "maintenance": False,
+            "new_user_notify": True
+        }
+    }
+
+def load_db():
+    default_data = get_default_db_data()
+    with db_lock:
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT data FROM mod_bot_storage WHERE key = 'main_config';")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        data = row[0]
+                        if isinstance(data, str):
+                            data = json.loads(data)
+                        for k, v in default_data.items():
+                            if k not in data:
+                                data[k] = v
+                        if OWNER_ID and OWNER_ID not in data.get("admins", []):
+                            data.setdefault("admins", []).append(OWNER_ID)
+                        return data
+                    else:
+                        save_db(default_data)
+                        return default_data
+        except Exception as e:
+            print(f"[DATABASE ERROR] Load failed: {e}", flush=True)
+            return default_data
+
+def save_db(data):
+    with db_lock:
+        try:
+            json_payload = json.dumps(data, default=str)
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO mod_bot_storage (key, data)
+                        VALUES ('main_config', %s)
+                        ON CONFLICT (key) DO UPDATE
+                        SET data = EXCLUDED.data;
+                    """, (json_payload,))
+        except Exception as e:
+            print(f"[DATABASE ERROR] Save failed: {e}", flush=True)
+
+db = load_db()
+
+# ----------------- HELPERS -----------------
 def get_full_timestamp():
     return datetime.now(IST).strftime("%d-%m-%Y %I:%M %p")
 
@@ -76,7 +155,7 @@ def register_user(user, chat_id=None):
             "username": f"@{user.username}" if user.username else "No Username",
             "joined_at": get_full_timestamp()
         }
-        db_engine.save_db(db)
+        save_db(db)
 
         if db.get("settings", {}).get("new_user_notify", True):
             u_tag = f"@{user.username}" if user.username else "None"
@@ -95,7 +174,7 @@ def register_user(user, chat_id=None):
     else:
         db["users"][user_id]["name"] = user.first_name or "Unknown"
         db["users"][user_id]["username"] = f"@{user.username}" if user.username else "No Username"
-        db_engine.save_db(db)
+        save_db(db)
 
 def get_admin_panel_markup():
     m_status = "ON" if db.get("settings", {}).get("maintenance", False) else "OFF"
@@ -130,7 +209,7 @@ def handle_bot_addition(message):
                 except Exception:
                     pass
 
-# ----------------- PRIVATE COMMANDS (/start, /claim, /admin) -----------------
+# ----------------- PRIVATE COMMANDS -----------------
 @bot.message_handler(commands=['start'], chat_types=['private'])
 def handle_start(message):
     user = message.from_user
@@ -154,7 +233,7 @@ def handle_start(message):
 def handle_claim_command(message):
     user_id = message.from_user.id
     if is_admin_or_owner(user_id):
-        bot.reply_to(message, "You are already authorized as an Admin. Send <code>/admin</code> to open the dashboard.")
+        bot.reply_to(message, "You are already authorized as an Admin. Send <code>/admin</code> to open dashboard.")
         return
 
     admin_state[user_id] = "waiting_claim_password"
@@ -182,7 +261,7 @@ def cmd_warn(message):
     key = f"{target.id}_{chat.id}"
     curr_warns = db.get("warnings", {}).get(key, 0) + 1
     db.setdefault("warnings", {})[key] = curr_warns
-    db_engine.save_db(db)
+    save_db(db)
 
     uname = f"@{target.username}" if target.username else target.first_name
 
@@ -192,7 +271,7 @@ def cmd_warn(message):
         bot.send_message(chat.id, f"{uname} [{target.id}] warned ({curr_warns} of 3).", reply_markup=markup)
     else:
         db["warnings"].pop(key, None)
-        db_engine.save_db(db)
+        save_db(db)
         try:
             bot.ban_chat_member(chat.id, target.id)
         except Exception:
@@ -256,7 +335,7 @@ def cmd_ban(message):
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
 
-# ----------------- GROUP MESSAGE MODERATION & ANTI-SPAM -----------------
+# ----------------- GROUP MODERATION & ANTI-SPAM -----------------
 @bot.message_handler(chat_types=['group', 'supergroup'], content_types=['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation'])
 def handle_group_moderation(message):
     user = message.from_user
@@ -268,7 +347,7 @@ def handle_group_moderation(message):
 
     if str(chat.id) not in db.get("groups", {}):
         db.setdefault("groups", {})[str(chat.id)] = {"id": chat.id, "title": chat.title}
-        db_engine.save_db(db)
+        save_db(db)
 
     is_user_adm = is_group_admin(chat.id, user.id)
 
@@ -319,7 +398,7 @@ def handle_group_moderation(message):
         key = f"{user.id}_{chat.id}"
         curr_warns = db.get("warnings", {}).get(key, 0) + 1
         db.setdefault("warnings", {})[key] = curr_warns
-        db_engine.save_db(db)
+        save_db(db)
 
         uname = f"@{user.username}" if user.username else user.first_name
 
@@ -329,7 +408,7 @@ def handle_group_moderation(message):
             bot.send_message(chat.id, f"{uname} [{user.id}] warned ({curr_warns} of 3).", reply_markup=markup)
         else:
             db["warnings"].pop(key, None)
-            db_engine.save_db(db)
+            save_db(db)
             try:
                 bot.ban_chat_member(chat.id, user.id)
             except Exception:
@@ -360,10 +439,10 @@ def handle_private_dialogue(message):
         if entered_pass == ADMIN_SECRET_KEY:
             if user_id not in db.setdefault("admins", []):
                 db["admins"].append(user_id)
-                db_engine.save_db(db)
+                save_db(db)
             bot.reply_to(
                 message,
-                "Admin Password Verified.\nYou are now authorized as Master Admin. Use <code>/admin</code> to open your dashboard.",
+                "Admin Password Verified.\nYou are now authorized as Master Admin. Use <code>/admin</code> to open dashboard.",
                 reply_markup=get_admin_panel_markup()
             )
         else:
@@ -392,7 +471,7 @@ def handle_private_dialogue(message):
         w = text.lower().strip()
         if w and w not in db.get("banned_words", []):
             db.setdefault("banned_words", []).append(w)
-            db_engine.save_db(db)
+            save_db(db)
         bot.reply_to(message, f"Word '{w}' added to banned words blacklist.", reply_markup=get_admin_panel_markup())
         return
 
@@ -423,7 +502,7 @@ def handle_private_dialogue(message):
             "btn_name": btn_name,
             "btn_url": btn_url
         }
-        db_engine.save_db(db)
+        save_db(db)
         bot.reply_to(message, "Custom auto-reply configured successfully.", reply_markup=get_admin_panel_markup())
         return
 
@@ -482,7 +561,7 @@ def handle_all_callbacks(call):
         key = f"{target_uid}_{target_cid}"
         count = db.get("warnings", {}).get(key, 0) + 1
         db.setdefault("warnings", {})[key] = count
-        db_engine.save_db(db)
+        save_db(db)
         bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
         return
 
@@ -493,7 +572,7 @@ def handle_all_callbacks(call):
         key = f"{target_uid}_{target_cid}"
         count = max(0, db.get("warnings", {}).get(key, 0) - 1)
         db.setdefault("warnings", {})[key] = count
-        db_engine.save_db(db)
+        save_db(db)
         bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
         return
 
@@ -587,14 +666,14 @@ def handle_all_callbacks(call):
     if data == "toggle_maintenance":
         curr = db.setdefault("settings", {}).get("maintenance", False)
         db["settings"]["maintenance"] = not curr
-        db_engine.save_db(db)
+        save_db(db)
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
     if data == "toggle_notify":
         curr = db.setdefault("settings", {}).get("new_user_notify", True)
         db["settings"]["new_user_notify"] = not curr
-        db_engine.save_db(db)
+        save_db(db)
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
@@ -611,11 +690,17 @@ def handle_all_callbacks(call):
         bot.edit_message_text("Administrator Control Panel\nSelect an action from the options below:", call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
-# ----------------- MAIN POLLING RUNNER -----------------
+# ----------------- MAIN RUNNER -----------------
+def run_bot_polling():
+    while True:
+        try:
+            print("[BOT] Starting Telegram polling cleanly...", flush=True)
+            bot.remove_webhook()
+            time.sleep(2)
+            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+        except Exception as e:
+            print(f"[BOT ERROR] Polling interrupted: {e}. Retrying in 5s...", flush=True)
+            time.sleep(5)
+
 if __name__ == "__main__":
-    print("[BOT] Starting Telegram polling cleanly...", flush=True)
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
-    bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+    run_bot_polling()
