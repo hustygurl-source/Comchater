@@ -136,6 +136,8 @@ def load_db():
                             data[k] = v
                     if "recurring_msg" not in data:
                         data["recurring_msg"] = default_data["recurring_msg"]
+                    if "custom_replies" not in data:
+                        data["custom_replies"] = {}
                     if OWNER_ID and OWNER_ID not in data.get("admins", []):
                         data.setdefault("admins", []).append(OWNER_ID)
                     return data
@@ -401,11 +403,11 @@ def get_admin_panel_markup():
         types.InlineKeyboardButton("Mailing", callback_data="adm_mailing_select"),
         types.InlineKeyboardButton("Statistics", callback_data="adm_stats"),
         types.InlineKeyboardButton(f"Auto Msg ({rec_status})", callback_data="adm_recurring_menu"),
+        types.InlineKeyboardButton("Custom Replies", callback_data="adm_custom_replies_menu"),
         types.InlineKeyboardButton("Manage Media", callback_data="adm_media_menu"),
         types.InlineKeyboardButton("Banned Words", callback_data="adm_banned_words"),
         types.InlineKeyboardButton(f"Maint. ({m_status})", callback_data="toggle_maintenance"),
         types.InlineKeyboardButton(f"New User ({n_status})", callback_data="toggle_notify"),
-        types.InlineKeyboardButton("Custom Replies", callback_data="adm_custom_replies"),
         types.InlineKeyboardButton("Manage Admins", callback_data="adm_manage_list"),
         types.InlineKeyboardButton("Close Panel", callback_data="adm_close")
     )
@@ -789,7 +791,7 @@ def handle_group_moderation(message):
         except Exception:
             pass
 
-    # 3. Channel/Group Username Filter (Only Person Usernames Allowed)
+    # 3. Channel/Group Username Filter
     usernames_found = re.findall(r"@([a-zA-Z0-9_]{4,32})", text)
     if usernames_found:
         for u in usernames_found:
@@ -942,6 +944,7 @@ def handle_private_dialogue(message):
     if state.startswith("submitting_appeal_"):
         target_group = state.replace("submitting_appeal_", "")
 
+        # 1. Profanity check
         for bw in db.get("banned_words", []):
             if bw in text.lower():
                 bot.reply_to(
@@ -950,6 +953,7 @@ def handle_private_dialogue(message):
                 )
                 return
 
+        # 2. Length check
         words_count = len(text.split())
         char_count = len(text.strip())
 
@@ -1141,20 +1145,16 @@ def handle_private_dialogue(message):
             bot.reply_to(message, "No valid photo, video or GIF detected.", reply_markup=get_admin_panel_markup())
         return
 
-    # Custom Reply Setup Flow
+    # Custom Reply Flow
     if state == "cr_step1_trigger":
         admin_state[user_id] = f"cr_step2_text_{text.lower().strip()}"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies"))
-        bot.reply_to(message, f"Trigger set: <code>{text.lower().strip()}</code>\n\nStep 2: Send the reply text:", reply_markup=markup)
+        bot.reply_to(message, f"Trigger set: <code>{text.lower().strip()}</code>\n\nStep 2: Send the reply text:")
         return
 
     if state.startswith("cr_step2_text_"):
         trigger = state.replace("cr_step2_text_", "")
         admin_state[user_id] = f"cr_step3_btn_{trigger}__SPLIT__{text}"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies"))
-        bot.reply_to(message, "Step 3: To attach a button: <code>Button Title | https://link.com</code>\nOr type <code>skip</code> for text only.", reply_markup=markup)
+        bot.reply_to(message, "Step 3: To attach a button: <code>Button Title | https://link.com</code>\nOr type <code>skip</code> for text only.")
         return
 
     if state.startswith("cr_step3_btn_"):
@@ -1574,7 +1574,75 @@ def handle_all_callbacks(call):
         bot.edit_message_text(stats_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
-    # Recurring Message Manager
+    # Custom Replies Submenu (Add, Delete, See List)
+    if data == "adm_custom_replies_menu":
+        c_len = len(db.get("custom_replies", {}))
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Add Reply", callback_data="adm_cr_add"),
+            types.InlineKeyboardButton("Delete Reply", callback_data="adm_cr_del"),
+            types.InlineKeyboardButton("See List", callback_data="adm_cr_list"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(
+            f"<b>Custom Auto-Replies Manager:</b>\n\nActive Custom Triggers: <code>{c_len}</code>\nChoose an action below:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
+        )
+        return
+
+    if data == "adm_cr_add":
+        admin_state[user_id] = "cr_step1_trigger"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies_menu"))
+        bot.edit_message_text("<b>Custom Reply Setup:</b>\n\nStep 1: Send the trigger keyword or phrase:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_cr_list":
+        creplies = db.get("custom_replies", {})
+        if not creplies:
+            list_text = "<b>No Custom Replies Set.</b>"
+        else:
+            lines = []
+            for k, v in creplies.items():
+                btn_info = f" [Button: {v.get('btn_name')}]" if v.get("btn_name") else ""
+                lines.append(f"• <b>Trigger:</b> <code>{k}</code>\n  <b>Reply:</b> {v.get('reply_text')}{btn_info}")
+            list_text = "<b>Active Custom Replies:</b>\n\n" + "\n\n".join(lines)
+
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies_menu"))
+        bot.edit_message_text(list_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_cr_del":
+        creplies = db.get("custom_replies", {})
+        if not creplies:
+            bot.answer_callback_query(call.id, "No custom replies to delete.", show_alert=True)
+            return
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for trig in list(creplies.keys()):
+            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies_menu"))
+        bot.edit_message_text("Select a custom reply trigger to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("del_cr_"):
+        trig_to_del = data.replace("del_cr_", "")
+        if trig_to_del in db.get("custom_replies", {}):
+            db["custom_replies"].pop(trig_to_del, None)
+            save_db(db)
+            bot.answer_callback_query(call.id, f"Deleted trigger: {trig_to_del}")
+
+        creplies = db.get("custom_replies", {})
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for trig in list(creplies.keys()):
+            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies_menu"))
+        bot.edit_message_text("Select a custom reply trigger to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # Recurring Message Submenu
     if data == "adm_recurring_menu":
         rec = db.get("recurring_msg", {})
         status = "Enabled" if rec.get("enabled") else "Disabled"
@@ -1608,6 +1676,7 @@ def handle_all_callbacks(call):
         db["recurring_msg"]["enabled"] = not curr
         save_db(db)
         bot.answer_callback_query(call.id, f"Auto message is now {'Enabled' if not curr else 'Disabled'}.")
+        
         rec = db.get("recurring_msg", {})
         status = "Enabled" if rec.get("enabled") else "Disabled"
         interval = rec.get("interval_min", 0)
@@ -1625,80 +1694,6 @@ def handle_all_callbacks(call):
             types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
         )
         bot.edit_message_text(rec_panel, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    # Custom Replies Submenu (Add / Delete / See List)
-    if data == "adm_custom_replies":
-        admin_state.pop(user_id, None)
-        cr_count = len(db.get("custom_replies", {}))
-        cr_text = (
-            "<b>Custom Auto-Replies Manager:</b>\n\n"
-            f"Total Active Triggers: <code>{cr_count}</code>\n"
-            "Select an action below:"
-        )
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Add Reply", callback_data="adm_cr_add"),
-            types.InlineKeyboardButton("Delete Reply", callback_data="adm_cr_del"),
-            types.InlineKeyboardButton("See List", callback_data="adm_cr_list"),
-            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
-        )
-        bot.edit_message_text(cr_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_cr_add":
-        admin_state[user_id] = "cr_step1_trigger"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies"))
-        bot.edit_message_text("<b>Custom Reply Setup:</b>\n\nStep 1: Send the trigger keyword or phrase:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_cr_list":
-        crs = db.get("custom_replies", {})
-        if not crs:
-            lines = ["• No custom replies added yet."]
-        else:
-            lines = []
-            for k, v in crs.items():
-                btn_str = f" [Btn: {v.get('btn_name')}]" if v.get("btn_name") else ""
-                lines.append(f"• <b>{k}</b> ➔ <i>\"{v.get('reply_text')[:35]}...\"</i>{btn_str}")
-
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
-        bot.edit_message_text("<b>Active Custom Replies:</b>\n\n" + "\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_cr_del":
-        crs = db.get("custom_replies", {})
-        if not crs:
-            bot.answer_callback_query(call.id, "No custom replies to delete.", show_alert=True)
-            return
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for trig in crs.keys():
-            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
-        bot.edit_message_text("Select a custom reply trigger below to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data.startswith("del_cr_"):
-        target_trig = data.replace("del_cr_", "")
-        if target_trig in db.get("custom_replies", {}):
-            db["custom_replies"].pop(target_trig, None)
-            save_db(db)
-            bot.answer_callback_query(call.id, f"Deleted trigger '{target_trig}'.")
-
-        crs = db.get("custom_replies", {})
-        if not crs:
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
-            bot.edit_message_text("All custom replies deleted.", call.message.chat.id, call.message.message_id, reply_markup=markup)
-            return
-
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for trig in crs.keys():
-            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
-        bot.edit_message_text("Select a custom reply trigger below to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     # Banned Words Submenu
