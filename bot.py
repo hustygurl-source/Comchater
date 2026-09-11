@@ -646,7 +646,6 @@ def cmd_unmute(message):
         bot.reply_to(message, "Usage: Reply to a user's message or send <code>/unmute username/id</code>")
         return
 
-    # Reset warnings on unmute
     key = f"{target.id}_{chat.id}"
     db.get("warnings", {}).pop(key, None)
     user_warn_cache.pop(key, None)
@@ -943,7 +942,6 @@ def handle_private_dialogue(message):
     if state.startswith("submitting_appeal_"):
         target_group = state.replace("submitting_appeal_", "")
 
-        # 1. Profanity check
         for bw in db.get("banned_words", []):
             if bw in text.lower():
                 bot.reply_to(
@@ -952,7 +950,6 @@ def handle_private_dialogue(message):
                 )
                 return
 
-        # 2. Length check
         words_count = len(text.split())
         char_count = len(text.strip())
 
@@ -1144,16 +1141,20 @@ def handle_private_dialogue(message):
             bot.reply_to(message, "No valid photo, video or GIF detected.", reply_markup=get_admin_panel_markup())
         return
 
-    # Custom Reply Flow
+    # Custom Reply Setup Flow
     if state == "cr_step1_trigger":
         admin_state[user_id] = f"cr_step2_text_{text.lower().strip()}"
-        bot.reply_to(message, f"Trigger set: <code>{text.lower().strip()}</code>\n\nStep 2: Send the reply text:")
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies"))
+        bot.reply_to(message, f"Trigger set: <code>{text.lower().strip()}</code>\n\nStep 2: Send the reply text:", reply_markup=markup)
         return
 
     if state.startswith("cr_step2_text_"):
         trigger = state.replace("cr_step2_text_", "")
         admin_state[user_id] = f"cr_step3_btn_{trigger}__SPLIT__{text}"
-        bot.reply_to(message, "Step 3: To attach a button: <code>Button Title | https://link.com</code>\nOr type <code>skip</code> for text only.")
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies"))
+        bot.reply_to(message, "Step 3: To attach a button: <code>Button Title | https://link.com</code>\nOr type <code>skip</code> for text only.", reply_markup=markup)
         return
 
     if state.startswith("cr_step3_btn_"):
@@ -1173,7 +1174,7 @@ def handle_private_dialogue(message):
             "btn_url": btn_url
         }
         save_db(db)
-        bot.reply_to(message, "Custom auto-reply saved.", reply_markup=get_admin_panel_markup())
+        bot.reply_to(message, f"Custom auto-reply for '<code>{trigger}</code>' saved successfully.", reply_markup=get_admin_panel_markup())
         return
 
     # Broadcast Flow
@@ -1313,7 +1314,6 @@ def handle_all_callbacks(call):
             cid = appeal.get("chat_id")
             t_user_tag = get_user_mention(target_uid, appeal.get("name", "User"), appeal.get("username"))
 
-            # Reset warnings for user in that chat
             if cid:
                 key = f"{target_uid}_{cid}"
                 db.get("warnings", {}).pop(key, None)
@@ -1574,7 +1574,7 @@ def handle_all_callbacks(call):
         bot.edit_message_text(stats_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
-    # Recurring Message Setup Submenu
+    # Recurring Message Manager
     if data == "adm_recurring_menu":
         rec = db.get("recurring_msg", {})
         status = "Enabled" if rec.get("enabled") else "Disabled"
@@ -1608,7 +1608,6 @@ def handle_all_callbacks(call):
         db["recurring_msg"]["enabled"] = not curr
         save_db(db)
         bot.answer_callback_query(call.id, f"Auto message is now {'Enabled' if not curr else 'Disabled'}.")
-        # Reload panel
         rec = db.get("recurring_msg", {})
         status = "Enabled" if rec.get("enabled") else "Disabled"
         interval = rec.get("interval_min", 0)
@@ -1626,6 +1625,80 @@ def handle_all_callbacks(call):
             types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
         )
         bot.edit_message_text(rec_panel, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # Custom Replies Submenu (Add / Delete / See List)
+    if data == "adm_custom_replies":
+        admin_state.pop(user_id, None)
+        cr_count = len(db.get("custom_replies", {}))
+        cr_text = (
+            "<b>Custom Auto-Replies Manager:</b>\n\n"
+            f"Total Active Triggers: <code>{cr_count}</code>\n"
+            "Select an action below:"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Add Reply", callback_data="adm_cr_add"),
+            types.InlineKeyboardButton("Delete Reply", callback_data="adm_cr_del"),
+            types.InlineKeyboardButton("See List", callback_data="adm_cr_list"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(cr_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_cr_add":
+        admin_state[user_id] = "cr_step1_trigger"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies"))
+        bot.edit_message_text("<b>Custom Reply Setup:</b>\n\nStep 1: Send the trigger keyword or phrase:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_cr_list":
+        crs = db.get("custom_replies", {})
+        if not crs:
+            lines = ["• No custom replies added yet."]
+        else:
+            lines = []
+            for k, v in crs.items():
+                btn_str = f" [Btn: {v.get('btn_name')}]" if v.get("btn_name") else ""
+                lines.append(f"• <b>{k}</b> ➔ <i>\"{v.get('reply_text')[:35]}...\"</i>{btn_str}")
+
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
+        bot.edit_message_text("<b>Active Custom Replies:</b>\n\n" + "\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_cr_del":
+        crs = db.get("custom_replies", {})
+        if not crs:
+            bot.answer_callback_query(call.id, "No custom replies to delete.", show_alert=True)
+            return
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for trig in crs.keys():
+            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
+        bot.edit_message_text("Select a custom reply trigger below to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("del_cr_"):
+        target_trig = data.replace("del_cr_", "")
+        if target_trig in db.get("custom_replies", {}):
+            db["custom_replies"].pop(target_trig, None)
+            save_db(db)
+            bot.answer_callback_query(call.id, f"Deleted trigger '{target_trig}'.")
+
+        crs = db.get("custom_replies", {})
+        if not crs:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
+            bot.edit_message_text("All custom replies deleted.", call.message.chat.id, call.message.message_id, reply_markup=markup)
+            return
+
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for trig in crs.keys():
+            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies"))
+        bot.edit_message_text("Select a custom reply trigger below to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     # Banned Words Submenu
@@ -1752,13 +1825,6 @@ def handle_all_callbacks(call):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_back"))
         bot.edit_message_text(f"Broadcast Mode ({target_mode.upper()}):\n\nSend or forward the message to broadcast:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_custom_replies":
-        admin_state[user_id] = "cr_step1_trigger"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_back"))
-        bot.edit_message_text("Custom Reply Setup:\n\nStep 1: Send the trigger keyword:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     if data == "toggle_maintenance":
