@@ -36,7 +36,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Moderation & Support Bot is Live 24/7 on Neon Postgres")
+        self.wfile.write(b"Moderation & Support Bot is Live 24/7")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -155,7 +155,7 @@ last_user_message = {}
 report_wizard_state = {}
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# ----------------- KUNDLI PREDICTIONS LIST (20+ Fun Predictions) -----------------
+# ----------------- KUNDLI PREDICTIONS LIST -----------------
 KUNDLI_PREDICTIONS = [
     "Aaj group mein crush se reply aane ke poore chance hain.",
     "Shani bhaari hai, aaj admin se warn lagne ke 99% aasaar hain.",
@@ -164,34 +164,49 @@ KUNDLI_PREDICTIONS = [
     "Raahu ki dasha chal rahi hai, deal karte waqt scammer se 2 gaj doori rakhein.",
     "Aapki kundli kehti hai ki aaj koi aapke msg ko seen karke ignore karega.",
     "Aapko jald hi group me samman aur izzat milne ke yog ban rahe hain.",
-    "Aaj aapka Wi-Fi/Data connection dhokha dega jab sabse zaroori reply dena hoga.",
+    "Aaj aapka Wi-Fi connection dhokha dega jab sabse zaroori reply dena hoga.",
     "Graho ki sthiti bata rahi hai ki aaj aapka roast hone wala hai.",
     "Aapka din shubh hai, appeal karoge to turant accept ho jayegi.",
     "Group me faltu gyan dene se bachein, warna mute hone ke yog prabal hain.",
-    "Mangal strong hai! Aaj kisi ladai me beech me mat padna warna be-wajah pel diye jaoge.",
+    "Mangal strong hai! Aaj kisi ladai me beech me mat padna.",
     "Aaj aapki DP dekh kar 2 log secret admirer banne wale hain.",
     "Aaj lottery lag sakti hai, bas kisi fake giveaway me participate mat karna.",
     "Aapki kundli me likha hai: 'Padhai-likhai karo, Telegram par timepass band karo'.",
     "Grah bata rahe hain ki aaj aapka tag notification sabse zyada bajega.",
-    "Aaj aap jo bhi meme bhejoge, uspar 0 reaction aayenge. Dil chota mat karna.",
+    "Aaj aap jo bhi meme bhejoge, uspar 0 reaction aayenge.",
     "Ketu ke prabhav se aaj aapka keyboard galat spelling type karwayega.",
     "Aapki life me shanti tabhi aayegi jab phone side me rakh kar so jaoge.",
-    "Aaj crush online aayegi lekin kisi aur ke funny sticker par has kar nikal jayegi.",
-    "Aapke sitaare buland hain, aaj crypto aur trading me green candles dikhengi."
+    "Aaj crush online aayegi lekin kisi aur ke funny sticker par react karegi.",
+    "Aapke sitaare buland hain, aaj crypto aur trading me fayda hoga."
 ]
 
-# ----------------- TELEGRAM COMMAND SCOPES SETUP -----------------
+# ----------------- HARD RESET & SETUP COMMAND SCOPES -----------------
 def setup_bot_commands():
     try:
-        # 1. Private Chat Scope
+        # Step 1: Wipe all previous commands from GroupHelp or any other bots
+        scopes_to_clear = [
+            types.BotCommandScopeDefault(),
+            types.BotCommandScopeAllPrivateChats(),
+            types.BotCommandScopeAllGroupChats(),
+            types.BotCommandScopeAllChatAdministrators()
+        ]
+        for sc in scopes_to_clear:
+            try:
+                bot.delete_my_commands(scope=sc)
+            except Exception:
+                pass
+        
+        time.sleep(1)
+
+        # Step 2: Register fresh Private Commands
         private_cmds = [
-            types.BotCommand("start", "Open Support & Appeal Portal"),
+            types.BotCommand("start", "Open Support Portal"),
             types.BotCommand("claim", "Verify secret admin key"),
             types.BotCommand("admin", "Open Administrator Panel")
         ]
         bot.set_my_commands(private_cmds, scope=types.BotCommandScopeAllPrivateChats())
 
-        # 2. Group & Supergroup Scope
+        # Step 3: Register fresh Group Commands
         group_cmds = [
             types.BotCommand("warn", "Warn a user [reply/id/username]"),
             types.BotCommand("unwarn", "Remove user warning"),
@@ -204,7 +219,7 @@ def setup_bot_commands():
             types.BotCommand("kundli", "Get daily fun horoscope & roast")
         ]
         bot.set_my_commands(group_cmds, scope=types.BotCommandScopeAllGroupChats())
-        print("[BOT] Private and Group command scopes configured successfully.", flush=True)
+        print("[BOT] Old commands killed & new scopes registered successfully.", flush=True)
     except Exception as e:
         print(f"[BOT] Command setup failed: {e}", flush=True)
 
@@ -276,6 +291,15 @@ def get_target_user(message):
                 return types.User(u["id"], False, u["name"], username=target_str)
     return None
 
+def resolve_target_id(target_str):
+    target_str = str(target_str).replace("@", "").strip()
+    if target_str.isdigit():
+        return int(target_str)
+    for u in db.get("users", {}).values():
+        if u.get("username", "").lower().replace("@", "") == target_str.lower():
+            return int(u["id"])
+    return None
+
 def send_with_optional_media(chat_id, media_key, text, reply_markup=None):
     media_id = db.get("media", {}).get(media_key)
     if media_id:
@@ -298,9 +322,9 @@ def send_with_optional_media(chat_id, media_key, text, reply_markup=None):
 def get_user_main_markup():
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("📝 Submit Appeal", callback_data="u_appeal_menu"),
-        types.InlineKeyboardButton("🚨 Report User", callback_data="u_report_menu"),
-        types.InlineKeyboardButton("📊 My Status", callback_data="u_status_menu")
+        types.InlineKeyboardButton("Submit Appeal", callback_data="u_appeal_menu"),
+        types.InlineKeyboardButton("Report User", callback_data="u_report_menu"),
+        types.InlineKeyboardButton("My Status", callback_data="u_status_menu")
     )
     return markup
 
@@ -356,7 +380,8 @@ def handle_start(message):
     welcome_text = (
         f"<b>Welcome, {get_user_mention(user.id, user.first_name, user.username)}</b>\n\n"
         "This is the official Group Moderation Support & Appeal Desk.\n"
-        "Please select an option below:"
+        "Please select an option below:\n\n"
+        "<i>Powered by @jyoex</i>"
     )
     send_with_optional_media(message.chat.id, "start", welcome_text, get_user_main_markup())
 
@@ -400,31 +425,30 @@ def cmd_matchmaker(message):
                 break
 
     if not user2 or user1.id == user2.id:
-        bot.reply_to(message, "Usage: Reply to someone's message with <code>/matchmaker</code> or mention a username: <code>/matchmaker @username</code>")
+        bot.reply_to(message, "Usage: Reply to a message with <code>/matchmaker</code> or mention a username: <code>/matchmaker @username</code>")
         return
 
-    # Seed match score by user IDs for consistent fun
     combined_id = int(user1.id) + int(user2.id)
     random.seed(combined_id + int(time.strftime("%d%m%Y")))
     percentage = random.randint(15, 100)
 
     if percentage > 80:
-        remark = "Rab Ne Bana Di Jodi! Shadi ki taiyari shuru karo."
+        remark = "Match score bohot solid hai. Perfect pair."
     elif percentage > 50:
-        remark = "Achhi compatibility hai, thodi mehnat lagegi."
+        remark = "Achhi chemistry hai, baat aage badh sakti hai."
     elif percentage > 30:
-        remark = "Bas dosti tak hi theek hai, zyada aage mat badho."
+        remark = "Normal dosti tak hi theek hai."
     else:
-        remark = "Khatra! Door raho warna daily kalesh pakka hai."
+        remark = "Compatibility bohot kam hai, doori banaye rakhein."
 
     u1_tag = get_user_mention(user1.id, user1.first_name, user1.username)
     u2_tag = get_user_mention(user2.id, user2.first_name, user2.username)
 
     match_text = (
-        "<b>Matchmaker Compatibility Report:</b>\n\n"
-        f"• Person 1: {u1_tag}\n"
-        f"• Person 2: {u2_tag}\n"
-        f"• Match Score: <b>{percentage}%</b>\n\n"
+        "<b>Matchmaker Report:</b>\n\n"
+        f"• User 1: {u1_tag}\n"
+        f"• User 2: {u2_tag}\n"
+        f"• Compatibility: <b>{percentage}%</b>\n\n"
         f"<b>Verdict:</b> {remark}"
     )
     bot.reply_to(message, match_text)
@@ -438,12 +462,11 @@ def cmd_kundli(message):
     score = random.randint(20, 100)
 
     kundli_card = (
-        f"<b>Dainik Kundli & Bhavishyavani:</b>\n"
+        f"<b>Dainik Kundli:</b>\n"
         f"User: {t_tag}\n\n"
-        f"<b>Grah Nakshatra Kehte Hain:</b>\n"
+        f"<b>Prediction:</b>\n"
         f"\"{prediction}\"\n\n"
-        f"• Bhagya Score: <b>{score}/100</b>\n"
-        f"• Shubh Grah: <b>Telegram Server</b>"
+        f"• Score: <b>{score}/100</b>"
     )
     bot.reply_to(message, kundli_card)
 
@@ -476,7 +499,6 @@ def cmd_warn(message):
         db["warnings"].pop(key, None)
         user_warn_cache.pop(key, None)
 
-        # Store restriction for appeal context
         db.setdefault("restrictions", {})[str(target.id)] = {
             "type": "Muted",
             "chat_id": chat.id,
@@ -603,7 +625,6 @@ def cmd_ban(message):
         }
         save_db(db)
 
-        # Send Private DM ONLY on BAN
         bot_user = bot.get_me().username
         ban_dm_text = (
             f"Hello {uname},\n\nYou have been <b>banned</b> from <b>{chat.title}</b>.\n"
@@ -652,7 +673,7 @@ def cmd_info(message):
     t_tag = get_user_mention(target.id, target.first_name, target.username)
 
     info_text = (
-        "<b>User Moderation Record:</b>\n\n"
+        "<b>User Record:</b>\n\n"
         f"• User: {t_tag}\n"
         f"• User ID: <code>{target.id}</code>\n"
         f"• Username: @{target.username if target.username else 'None'}\n"
@@ -711,7 +732,7 @@ def handle_group_moderation(message):
             except Exception:
                 pass
 
-    # 4. Anti-Flood System: 4th message deleted instantly
+    # 4. Anti-Flood: 4th message deleted instantly
     now = time.time()
     user_history = user_message_history.setdefault(user.id, [])
     user_history.append(now)
@@ -826,7 +847,6 @@ def handle_private_dialogue(message):
         admin_state.pop(user_id, None)
         appeal_id = str(int(time.time()))
 
-        # Get restriction history if available
         r_info = db.get("restrictions", {}).get(str(user_id), {
             "type": "Muted/Banned",
             "chat_id": 0,
@@ -851,26 +871,26 @@ def handle_private_dialogue(message):
 
         # Forward Card to Central Group (@appealreport)
         appeal_card = (
-            f"⚖️ <b>NEW APPEAL CASE [ID: #{appeal_id}]</b>\n\n"
+            f"<b>NEW APPEAL CASE [ID: #{appeal_id}]</b>\n\n"
             f"• <b>User:</b> {u_tag} [<code>{user_id}</code>]\n"
             f"• <b>Target Community:</b> {target_group}\n"
             f"• <b>Status in Group:</b> {r_info.get('type', 'Muted')}\n"
             f"• <b>Trigger Reason:</b> <code>{r_info.get('reason', 'Violation')}</code>\n"
             f"• <b>Last Message:</b> <i>\"{r_info.get('last_msg', 'N/A')}\"</i>\n"
             f"• <b>Time:</b> <code>{get_full_timestamp()}</code>\n\n"
-            f"📝 <b>User Explanation:</b>\n{text}"
+            f"<b>User Explanation:</b>\n{text}"
         )
 
         markup = types.InlineKeyboardMarkup(row_width=2)
         if r_info.get("type") == "Banned":
             markup.add(
-                types.InlineKeyboardButton("❌ Reject Appeal", callback_data=f"app_rej_{appeal_id}"),
-                types.InlineKeyboardButton("✅ Unban & Approve", callback_data=f"app_appr_ban_{appeal_id}")
+                types.InlineKeyboardButton("Reject Appeal", callback_data=f"app_rej_{appeal_id}"),
+                types.InlineKeyboardButton("Unban & Approve", callback_data=f"app_appr_ban_{appeal_id}")
             )
         else:
             markup.add(
-                types.InlineKeyboardButton("❌ Reject Appeal", callback_data=f"app_rej_{appeal_id}"),
-                types.InlineKeyboardButton("✅ Unmute & Approve", callback_data=f"app_appr_mute_{appeal_id}")
+                types.InlineKeyboardButton("Reject Appeal", callback_data=f"app_rej_{appeal_id}"),
+                types.InlineKeyboardButton("Unmute & Approve", callback_data=f"app_appr_mute_{appeal_id}")
             )
 
         try:
@@ -880,7 +900,7 @@ def handle_private_dialogue(message):
 
         bot.reply_to(
             message,
-            f"{u_tag}, your appeal has been successfully submitted! Our moderation team will review your case and update your status shortly."
+            f"{u_tag}, your appeal has been successfully submitted. Our moderation team will review your case shortly."
         )
         return
 
@@ -940,19 +960,21 @@ def handle_private_dialogue(message):
 
         # Forward Report Card to Central Group (@appealreport)
         report_card = (
-            f"🚨 <b>NEW SCAM REPORT [CASE #{report_id}]</b>\n\n"
+            f"<b>NEW SCAM REPORT [CASE #{report_id}]</b>\n\n"
             f"• <b>Reported Scammer:</b> <code>{rep_data.get('target')}</code>\n"
             f"• <b>Submitted By:</b> {u_tag} [<code>{user_id}</code>]\n"
             f"• <b>Deal Value:</b> <code>{rep_data.get('amount')}</code>\n"
             f"• <b>Proof Link:</b> {proof_link}\n"
             f"• <b>Date:</b> <code>{get_full_timestamp()}</code>\n\n"
-            f"📄 <b>Summary:</b>\n{rep_data.get('summary')}"
+            f"<b>Summary:</b>\n{rep_data.get('summary')}"
         )
 
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("📢 Post to Scam Hub", callback_data=f"rep_posthub_{report_id}"),
-            types.InlineKeyboardButton("❌ Dismiss", callback_data=f"rep_dismiss_{report_id}")
+            types.InlineKeyboardButton("Post to Scam Hub", callback_data=f"rep_posthub_{report_id}"),
+            types.InlineKeyboardButton("Dismiss", callback_data=f"rep_dismiss_{report_id}"),
+            types.InlineKeyboardButton("Ban User", callback_data=f"rep_ban_{report_id}"),
+            types.InlineKeyboardButton("Mute User", callback_data=f"rep_mute_{report_id}")
         )
 
         try:
@@ -962,7 +984,7 @@ def handle_private_dialogue(message):
 
         bot.reply_to(
             message,
-            f"{u_tag}, your scam report has been submitted to the moderation desk for review and public alert verification."
+            f"{u_tag}, your scam report has been submitted to the moderation desk for verification."
         )
         return
 
@@ -1072,7 +1094,8 @@ def handle_all_callbacks(call):
         welcome_text = (
             f"<b>Welcome, {u_tag}</b>\n\n"
             "This is the official Group Moderation Support & Appeal Desk.\n"
-            "Please select an option below:"
+            "Please select an option below:\n\n"
+            "<i>Powered by @jyoex</i>"
         )
         bot.edit_message_text(welcome_text, call.message.chat.id, call.message.message_id, reply_markup=get_user_main_markup())
         return
@@ -1141,14 +1164,13 @@ def handle_all_callbacks(call):
             target_uid = appeal["user_id"]
             t_user_tag = get_user_mention(target_uid, appeal.get("name", "User"), appeal.get("username"))
 
-            # Notify user in DM
             try:
                 bot.send_message(target_uid, f"Hello {t_user_tag},\n\nYour appeal for <b>{appeal.get('target')}</b> has been reviewed and <b>rejected</b> by moderators.")
             except Exception:
                 pass
 
             bot.edit_message_text(
-                call.message.text + f"\n\n❌ <b>Appeal Rejected by {call.from_user.first_name}</b>",
+                call.message.text + f"\n\n<b>Status:</b> Rejected by {call.from_user.first_name}",
                 call.message.chat.id,
                 call.message.message_id
             )
@@ -1156,7 +1178,7 @@ def handle_all_callbacks(call):
 
     if data.startswith("app_appr_"):
         parts = data.split("_")
-        action_mode = parts[2] # mute or ban
+        action_mode = parts[2]
         appeal_id = parts[3]
         appeal = db.get("appeals", {}).get(appeal_id)
 
@@ -1167,7 +1189,6 @@ def handle_all_callbacks(call):
             cid = appeal.get("chat_id")
             t_user_tag = get_user_mention(target_uid, appeal.get("name", "User"), appeal.get("username"))
 
-            # Lift restriction
             if cid:
                 try:
                     if action_mode == "ban":
@@ -1180,10 +1201,9 @@ def handle_all_callbacks(call):
                 except Exception:
                     pass
 
-            # Invite link / Rejoin button
             join_link = SELL_HUB_LINK if "Sell" in appeal.get("target", "") else "https://t.me/comchater"
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("🔗 Rejoin Group", url=join_link))
+            markup.add(types.InlineKeyboardButton("Rejoin Group", url=join_link))
 
             try:
                 bot.send_message(
@@ -1195,31 +1215,31 @@ def handle_all_callbacks(call):
                 pass
 
             bot.edit_message_text(
-                call.message.text + f"\n\n✅ <b>Appeal Approved by {call.from_user.first_name}</b>",
+                call.message.text + f"\n\n<b>Status:</b> Approved & Restored by {call.from_user.first_name}",
                 call.message.chat.id,
                 call.message.message_id
             )
         return
 
-    # Scam Report Actions (@scamreporthub)
+    # Scam Report Actions (@appealreport)
     if data.startswith("rep_posthub_"):
         report_id = data.replace("rep_posthub_", "")
         rep = db.get("reports", {}).get(report_id)
         if rep:
             hub_post = (
-                f"🚨 <b>OFFICIAL SCAM ALERT</b> 🚨\n\n"
+                "<b>OFFICIAL SCAM ALERT</b>\n\n"
                 f"• <b>Scammer Identifier:</b> <code>{rep['target']}</code>\n"
                 f"• <b>Scammed Amount:</b> <code>{rep['amount']}</code>\n"
-                f"• <b>Evidence & Screenshots:</b> {rep['proof']}\n"
-                f"• <b>Verified Date:</b> <code>{get_full_timestamp()}</code>\n\n"
-                f"<b>Details:</b>\n{rep['summary']}\n\n"
+                f"• <b>Evidence Link:</b> {rep['proof']}\n"
+                f"• <b>Date:</b> <code>{get_full_timestamp()}</code>\n\n"
+                f"<b>Summary:</b>\n{rep['summary']}\n\n"
                 "<i>Beware of dealing with this entity. Always use trusted escrows.</i>"
             )
             try:
                 bot.send_message(SCAM_HUB_CHAT, hub_post)
-                bot.answer_callback_query(call.id, "Alert published to Scam Hub!")
+                bot.answer_callback_query(call.id, "Alert published to Scam Hub.")
                 bot.edit_message_text(
-                    call.message.text + f"\n\n📢 <b>Published to Scam Hub by {call.from_user.first_name}</b>",
+                    call.message.text + f"\n\n<b>Action:</b> Published to Scam Hub by {call.from_user.first_name}",
                     call.message.chat.id,
                     call.message.message_id
                 )
@@ -1227,9 +1247,53 @@ def handle_all_callbacks(call):
                 bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
         return
 
+    if data.startswith("rep_ban_"):
+        report_id = data.replace("rep_ban_", "")
+        rep = db.get("reports", {}).get(report_id)
+        if rep:
+            target_raw = rep.get("target", "")
+            target_uid = resolve_target_id(target_raw)
+            if target_uid:
+                for gid in db.get("groups", {}).keys():
+                    try:
+                        bot.ban_chat_member(int(gid), target_uid)
+                    except Exception:
+                        pass
+                bot.answer_callback_query(call.id, f"User {target_raw} banned from groups.")
+                bot.edit_message_text(
+                    call.message.text + f"\n\n<b>Action:</b> Scammer Banned across groups by {call.from_user.first_name}",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+            else:
+                bot.answer_callback_query(call.id, "Numeric User ID not found to execute group ban.", show_alert=True)
+        return
+
+    if data.startswith("rep_mute_"):
+        report_id = data.replace("rep_mute_", "")
+        rep = db.get("reports", {}).get(report_id)
+        if rep:
+            target_raw = rep.get("target", "")
+            target_uid = resolve_target_id(target_raw)
+            if target_uid:
+                for gid in db.get("groups", {}).keys():
+                    try:
+                        bot.restrict_chat_member(int(gid), target_uid, can_send_messages=False)
+                    except Exception:
+                        pass
+                bot.answer_callback_query(call.id, f"User {target_raw} muted in groups.")
+                bot.edit_message_text(
+                    call.message.text + f"\n\n<b>Action:</b> Scammer Muted across groups by {call.from_user.first_name}",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+            else:
+                bot.answer_callback_query(call.id, "Numeric User ID not found to execute group mute.", show_alert=True)
+        return
+
     if data.startswith("rep_dismiss_"):
         bot.edit_message_text(
-            call.message.text + f"\n\n❌ <b>Report Dismissed by {call.from_user.first_name}</b>",
+            call.message.text + f"\n\n<b>Action:</b> Dismissed by {call.from_user.first_name}",
             call.message.chat.id,
             call.message.message_id
         )
@@ -1289,223 +1353,4 @@ def handle_all_callbacks(call):
 
     if data.startswith("act_unmute_"):
         _, _, target_uid, target_cid = data.split("_")
-        if not is_group_admin(int(target_cid), user_id):
-            bot.answer_callback_query(call.id, "Admin authorization required.", show_alert=True)
-            return
-        try:
-            bot.restrict_chat_member(
-                int(target_cid), int(target_uid),
-                can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True
-            )
-            bot.edit_message_text(f"User [{target_uid}] unmuted by {call.from_user.first_name}.", call.message.chat.id, call.message.message_id)
-        except Exception as e:
-            bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
-        return
-
-    # Master Admin Panel
-    if not is_admin_or_owner(user_id):
-        bot.answer_callback_query(call.id, "Access Denied.")
-        return
-
-    if data == "adm_close":
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        return
-
-    if data == "adm_stats":
-        u_len = len(db.get("users", {}))
-        g_len = len(db.get("groups", {}))
-        w_len = len(db.get("banned_words", []))
-        c_len = len(db.get("custom_replies", {}))
-        a_len = len(db.get("appeals", {}))
-        r_len = len(db.get("reports", {}))
-        stats_text = (
-            "<b>Bot Analytics & Performance:</b>\n\n"
-            f"• Registered Users: <code>{u_len}</code>\n"
-            f"• Active Groups: <code>{g_len}</code>\n"
-            f"• Total Appeals Handled: <code>{a_len}</code>\n"
-            f"• Scam Reports Logged: <code>{r_len}</code>\n"
-            f"• Filtered Blacklist Words: <code>{w_len}</code>\n"
-            f"• Custom Auto-Replies: <code>{c_len}</code>\n"
-            f"• Storage: <code>Neon PostgreSQL JSONB</code>"
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_back"))
-        bot.edit_message_text(stats_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    # Banned Words Submenu
-    if data == "adm_banned_words":
-        words = db.get("banned_words", [])
-        words_list = ", ".join(words) if words else "None"
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Add Word", callback_data="adm_bw_add"),
-            types.InlineKeyboardButton("Delete Word", callback_data="adm_bw_del"),
-            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
-        )
-        bot.edit_message_text(f"<b>Banned Words Blacklist:</b>\n\n<code>{words_list}</code>", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_bw_add":
-        admin_state[user_id] = "adm_add_banned_word"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_banned_words"))
-        bot.edit_message_text("Send the word/phrase to add to blacklist:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_bw_del":
-        words = db.get("banned_words", [])
-        if not words:
-            bot.answer_callback_query(call.id, "No words to delete.", show_alert=True)
-            return
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for idx, w in enumerate(words):
-            markup.add(types.InlineKeyboardButton(f"❌ {w}", callback_data=f"del_bw_{idx}"))
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_banned_words"))
-        bot.edit_message_text("Select a word below to remove from blacklist:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data.startswith("del_bw_"):
-        idx = int(data.replace("del_bw_", ""))
-        words = db.get("banned_words", [])
-        if 0 <= idx < len(words):
-            removed = words.pop(idx)
-            db["banned_words"] = words
-            save_db(db)
-            bot.answer_callback_query(call.id, f"Removed '{removed}' from blacklist.")
-        words = db.get("banned_words", [])
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for i, w in enumerate(words):
-            markup.add(types.InlineKeyboardButton(f"❌ {w}", callback_data=f"del_bw_{i}"))
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_banned_words"))
-        bot.edit_message_text("Select a word below to remove from blacklist:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    # Media Management Menu
-    if data == "adm_media_menu":
-        m = db.get("media", {})
-        s_m = "Set" if m.get("start") else "None"
-        b_m = "Set" if m.get("ban") else "None"
-        mu_m = "Set" if m.get("mute") else "None"
-        w_m = "Set" if m.get("warn") else "None"
-
-        media_text = (
-            "<b>Manage Command Media:</b>\n\n"
-            f"• Start Media: <code>{s_m}</code>\n"
-            f"• Ban Media: <code>{b_m}</code>\n"
-            f"• Mute Media: <code>{mu_m}</code>\n"
-            f"• Warn Media: <code>{w_m}</code>"
-        )
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Set Start Media", callback_data="mset_start"),
-            types.InlineKeyboardButton("Set Ban Media", callback_data="mset_ban"),
-            types.InlineKeyboardButton("Set Mute Media", callback_data="mset_mute"),
-            types.InlineKeyboardButton("Set Warn Media", callback_data="mset_warn"),
-            types.InlineKeyboardButton("Reset All Media", callback_data="mset_reset_all"),
-            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
-        )
-        bot.edit_message_text(media_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data.startswith("mset_") and data != "mset_reset_all":
-        target_m = data.replace("mset_", "")
-        admin_state[user_id] = f"media_set_{target_m}"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_media_menu"))
-        bot.edit_message_text(f"Please send the Photo, Video, or GIF you want to set for <b>{target_m.upper()}</b>:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "mset_reset_all":
-        db["media"] = {"start": None, "ban": None, "mute": None, "warn": None}
-        save_db(db)
-        bot.answer_callback_query(call.id, "All command media has been reset.")
-        media_text = (
-            "<b>Manage Command Media:</b>\n\n"
-            "• Start Media: <code>None</code>\n"
-            "• Ban Media: <code>None</code>\n"
-            "• Mute Media: <code>None</code>\n"
-            "• Warn Media: <code>None</code>"
-        )
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Set Start Media", callback_data="mset_start"),
-            types.InlineKeyboardButton("Set Ban Media", callback_data="mset_ban"),
-            types.InlineKeyboardButton("Set Mute Media", callback_data="mset_mute"),
-            types.InlineKeyboardButton("Set Warn Media", callback_data="mset_warn"),
-            types.InlineKeyboardButton("Reset All Media", callback_data="mset_reset_all"),
-            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
-        )
-        bot.edit_message_text(media_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    # Broadcast Targets
-    if data == "adm_mailing_select":
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("Both (Users + Groups)", callback_data="mail_both"),
-            types.InlineKeyboardButton("Users Only", callback_data="mail_users"),
-            types.InlineKeyboardButton("Groups Only", callback_data="mail_groups"),
-            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
-        )
-        bot.edit_message_text("Select broadcast target audience:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data.startswith("mail_"):
-        target_mode = data.replace("mail_", "")
-        admin_state[user_id] = f"broadcast_{target_mode}"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_back"))
-        bot.edit_message_text(f"Broadcast Mode ({target_mode.upper()}):\n\nSend or forward the message to broadcast:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_custom_replies":
-        admin_state[user_id] = "cr_step1_trigger"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_back"))
-        bot.edit_message_text("Custom Reply Setup:\n\nStep 1: Send the trigger keyword:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "toggle_maintenance":
-        curr = db.setdefault("settings", {}).get("maintenance", False)
-        db["settings"]["maintenance"] = not curr
-        save_db(db)
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
-        return
-
-    if data == "toggle_notify":
-        curr = db.setdefault("settings", {}).get("new_user_notify", True)
-        db["settings"]["new_user_notify"] = not curr
-        save_db(db)
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
-        return
-
-    if data == "adm_manage_list":
-        adms = db.get("admins", [])
-        lines = [f"• <code>{a}</code>" for a in adms]
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_back"))
-        bot.edit_message_text("<b>Authorized Administrators:</b>\n\n" + "\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_back":
-        admin_state.pop(user_id, None)
-        bot.edit_message_text("<b>Administrator Control Panel</b>\nSelect an option below to manage settings:", call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
-        return
-
-# ----------------- ENTRYPOINT & SAFE POLLING LOOP -----------------
-def start_safe_polling():
-    while True:
-        try:
-            me = bot.get_me()
-            print(f"[BOT] Active and polling as @{me.username} (ID: {me.id})", flush=True)
-            bot.remove_webhook()
-            setup_bot_commands()
-            time.sleep(2)
-            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
-        except Exception as e:
-            print(f"[BOT RECOVERY] Loop error: {e}. Retrying in 5 seconds...", flush=True)
-            time.sleep(5)
-
-if __name__ == "__main__":
-    start_safe_polling()
+        if not is_group_admin(int(target_cid), user_
