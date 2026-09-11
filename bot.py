@@ -147,7 +147,7 @@ def load_db():
 threading.Thread(target=init_postgres, daemon=True).start()
 db = load_db()
 
-# In-Memory Dynamic Trackers
+# In-Memory Trackers
 admin_state = {}
 user_message_history = {}
 user_warn_cache = {}
@@ -183,7 +183,6 @@ KUNDLI_PREDICTIONS = [
 # ----------------- HARD RESET & SETUP COMMAND SCOPES -----------------
 def setup_bot_commands():
     try:
-        # Step 1: Wipe all previous commands from GroupHelp or any other bots
         scopes_to_clear = [
             types.BotCommandScopeDefault(),
             types.BotCommandScopeAllPrivateChats(),
@@ -198,7 +197,6 @@ def setup_bot_commands():
         
         time.sleep(1)
 
-        # Step 2: Register fresh Private Commands
         private_cmds = [
             types.BotCommand("start", "Open Support Portal"),
             types.BotCommand("claim", "Verify secret admin key"),
@@ -206,7 +204,6 @@ def setup_bot_commands():
         ]
         bot.set_my_commands(private_cmds, scope=types.BotCommandScopeAllPrivateChats())
 
-        # Step 3: Register fresh Group Commands
         group_cmds = [
             types.BotCommand("warn", "Warn a user [reply/id/username]"),
             types.BotCommand("unwarn", "Remove user warning"),
@@ -1353,4 +1350,223 @@ def handle_all_callbacks(call):
 
     if data.startswith("act_unmute_"):
         _, _, target_uid, target_cid = data.split("_")
-        if not is_group_admin(int(target_cid), user_
+        if not is_group_admin(int(target_cid), user_id):
+            bot.answer_callback_query(call.id, "Admin authorization required.", show_alert=True)
+            return
+        try:
+            bot.restrict_chat_member(
+                int(target_cid), int(target_uid),
+                can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True
+            )
+            bot.edit_message_text(f"User [{target_uid}] unmuted by {call.from_user.first_name}.", call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
+        return
+
+    # Master Admin Panel
+    if not is_admin_or_owner(user_id):
+        bot.answer_callback_query(call.id, "Access Denied.")
+        return
+
+    if data == "adm_close":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        return
+
+    if data == "adm_stats":
+        u_len = len(db.get("users", {}))
+        g_len = len(db.get("groups", {}))
+        w_len = len(db.get("banned_words", []))
+        c_len = len(db.get("custom_replies", {}))
+        a_len = len(db.get("appeals", {}))
+        r_len = len(db.get("reports", {}))
+        stats_text = (
+            "<b>Bot Analytics & Performance:</b>\n\n"
+            f"• Registered Users: <code>{u_len}</code>\n"
+            f"• Active Groups: <code>{g_len}</code>\n"
+            f"• Total Appeals Handled: <code>{a_len}</code>\n"
+            f"• Scam Reports Logged: <code>{r_len}</code>\n"
+            f"• Filtered Blacklist Words: <code>{w_len}</code>\n"
+            f"• Custom Auto-Replies: <code>{c_len}</code>\n"
+            f"• Storage: <code>Neon PostgreSQL JSONB</code>"
+        )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_back"))
+        bot.edit_message_text(stats_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # Banned Words Submenu
+    if data == "adm_banned_words":
+        words = db.get("banned_words", [])
+        words_list = ", ".join(words) if words else "None"
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Add Word", callback_data="adm_bw_add"),
+            types.InlineKeyboardButton("Delete Word", callback_data="adm_bw_del"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(f"<b>Banned Words Blacklist:</b>\n\n<code>{words_list}</code>", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_bw_add":
+        admin_state[user_id] = "adm_add_banned_word"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_banned_words"))
+        bot.edit_message_text("Send the word/phrase to add to blacklist:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_bw_del":
+        words = db.get("banned_words", [])
+        if not words:
+            bot.answer_callback_query(call.id, "No words to delete.", show_alert=True)
+            return
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for idx, w in enumerate(words):
+            markup.add(types.InlineKeyboardButton(f"Remove: {w}", callback_data=f"del_bw_{idx}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_banned_words"))
+        bot.edit_message_text("Select a word below to remove from blacklist:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("del_bw_"):
+        idx = int(data.replace("del_bw_", ""))
+        words = db.get("banned_words", [])
+        if 0 <= idx < len(words):
+            removed = words.pop(idx)
+            db["banned_words"] = words
+            save_db(db)
+            bot.answer_callback_query(call.id, f"Removed '{removed}' from blacklist.")
+        words = db.get("banned_words", [])
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for i, w in enumerate(words):
+            markup.add(types.InlineKeyboardButton(f"Remove: {w}", callback_data=f"del_bw_{i}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_banned_words"))
+        bot.edit_message_text("Select a word below to remove from blacklist:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # Media Management Menu
+    if data == "adm_media_menu":
+        m = db.get("media", {})
+        s_m = "Set" if m.get("start") else "None"
+        b_m = "Set" if m.get("ban") else "None"
+        mu_m = "Set" if m.get("mute") else "None"
+        w_m = "Set" if m.get("warn") else "None"
+
+        media_text = (
+            "<b>Manage Command Media:</b>\n\n"
+            f"• Start Media: <code>{s_m}</code>\n"
+            f"• Ban Media: <code>{b_m}</code>\n"
+            f"• Mute Media: <code>{mu_m}</code>\n"
+            f"• Warn Media: <code>{w_m}</code>"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Set Start Media", callback_data="mset_start"),
+            types.InlineKeyboardButton("Set Ban Media", callback_data="mset_ban"),
+            types.InlineKeyboardButton("Set Mute Media", callback_data="mset_mute"),
+            types.InlineKeyboardButton("Set Warn Media", callback_data="mset_warn"),
+            types.InlineKeyboardButton("Reset All Media", callback_data="mset_reset_all"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(media_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("mset_") and data != "mset_reset_all":
+        target_m = data.replace("mset_", "")
+        admin_state[user_id] = f"media_set_{target_m}"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_media_menu"))
+        bot.edit_message_text(f"Please send the Photo, Video, or GIF you want to set for <b>{target_m.upper()}</b>:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "mset_reset_all":
+        db["media"] = {"start": None, "ban": None, "mute": None, "warn": None}
+        save_db(db)
+        bot.answer_callback_query(call.id, "All command media has been reset.")
+        media_text = (
+            "<b>Manage Command Media:</b>\n\n"
+            "• Start Media: <code>None</code>\n"
+            "• Ban Media: <code>None</code>\n"
+            "• Mute Media: <code>None</code>\n"
+            "• Warn Media: <code>None</code>"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Set Start Media", callback_data="mset_start"),
+            types.InlineKeyboardButton("Set Ban Media", callback_data="mset_ban"),
+            types.InlineKeyboardButton("Set Mute Media", callback_data="mset_mute"),
+            types.InlineKeyboardButton("Set Warn Media", callback_data="mset_warn"),
+            types.InlineKeyboardButton("Reset All Media", callback_data="mset_reset_all"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(media_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # Broadcast Targets
+    if data == "adm_mailing_select":
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("Both (Users + Groups)", callback_data="mail_both"),
+            types.InlineKeyboardButton("Users Only", callback_data="mail_users"),
+            types.InlineKeyboardButton("Groups Only", callback_data="mail_groups"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text("Select broadcast target audience:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("mail_"):
+        target_mode = data.replace("mail_", "")
+        admin_state[user_id] = f"broadcast_{target_mode}"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_back"))
+        bot.edit_message_text(f"Broadcast Mode ({target_mode.upper()}):\n\nSend or forward the message to broadcast:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_custom_replies":
+        admin_state[user_id] = "cr_step1_trigger"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_back"))
+        bot.edit_message_text("Custom Reply Setup:\n\nStep 1: Send the trigger keyword:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "toggle_maintenance":
+        curr = db.setdefault("settings", {}).get("maintenance", False)
+        db["settings"]["maintenance"] = not curr
+        save_db(db)
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
+        return
+
+    if data == "toggle_notify":
+        curr = db.setdefault("settings", {}).get("new_user_notify", True)
+        db["settings"]["new_user_notify"] = not curr
+        save_db(db)
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
+        return
+
+    if data == "adm_manage_list":
+        adms = db.get("admins", [])
+        lines = [f"• <code>{a}</code>" for a in adms]
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_back"))
+        bot.edit_message_text("<b>Authorized Administrators:</b>\n\n" + "\n".join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_back":
+        admin_state.pop(user_id, None)
+        bot.edit_message_text("<b>Administrator Control Panel</b>\nSelect an option below to manage settings:", call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
+        return
+
+# ----------------- ENTRYPOINT & SAFE POLLING LOOP -----------------
+def start_safe_polling():
+    while True:
+        try:
+            me = bot.get_me()
+            print(f"[BOT] Active and polling as @{me.username} (ID: {me.id})", flush=True)
+            bot.remove_webhook()
+            setup_bot_commands()
+            time.sleep(2)
+            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+        except Exception as e:
+            print(f"[BOT RECOVERY] Loop error: {e}. Retrying in 5 seconds...", flush=True)
+            time.sleep(5)
+
+if __name__ == "__main__":
+    start_safe_polling()
