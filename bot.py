@@ -19,7 +19,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 ADMIN_SECRET_KEY = "mansour$vx"
 
-# Centralized Channels & Groups
 APPEAL_REPORT_CHAT = "@appealreport"
 SCAM_HUB_CHAT = "@scamreporthub"
 SELL_HUB_LINK = "https://t.me/+-wIzWjIOv9swNTk1"
@@ -88,6 +87,13 @@ def get_default_db_data():
         "custom_replies": {},
         "appeals": {},
         "reports": {},
+        "recurring_msg": {
+            "text": None,
+            "interval_min": 0,
+            "enabled": False,
+            "last_sent": 0,
+            "last_msg_ids": {}
+        },
         "media": {
             "start": None,
             "ban": None,
@@ -128,12 +134,8 @@ def load_db():
                     for k, v in default_data.items():
                         if k not in data:
                             data[k] = v
-                    if "media" not in data:
-                        data["media"] = default_data["media"]
-                    if "restrictions" not in data:
-                        data["restrictions"] = {}
-                    if "reports" not in data:
-                        data["reports"] = {}
+                    if "recurring_msg" not in data:
+                        data["recurring_msg"] = default_data["recurring_msg"]
                     if OWNER_ID and OWNER_ID not in data.get("admins", []):
                         data.setdefault("admins", []).append(OWNER_ID)
                     return data
@@ -147,12 +149,12 @@ def load_db():
 threading.Thread(target=init_postgres, daemon=True).start()
 db = load_db()
 
-# In-Memory Trackers
 admin_state = {}
 user_message_history = {}
 user_warn_cache = {}
 last_user_message = {}
 report_wizard_state = {}
+known_entities_cache = {}
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ----------------- KUNDLI PREDICTIONS LIST -----------------
@@ -180,7 +182,42 @@ KUNDLI_PREDICTIONS = [
     "Aapke sitaare buland hain, aaj crypto aur trading me fayda hoga."
 ]
 
-# ----------------- HARD RESET & SETUP COMMAND SCOPES -----------------
+# ----------------- RECURRING MESSAGE BACKGROUND THREAD -----------------
+def recurring_message_worker():
+    while True:
+        try:
+            time.sleep(30)
+            rec = db.get("recurring_msg", {})
+            if not rec.get("enabled") or not rec.get("text") or rec.get("interval_min", 0) <= 0:
+                continue
+
+            interval_sec = rec["interval_min"] * 60
+            now = time.time()
+            if now - rec.get("last_sent", 0) >= interval_sec:
+                rec["last_sent"] = now
+                msg_ids = rec.setdefault("last_msg_ids", {})
+
+                for gid in list(db.get("groups", {}).keys()):
+                    try:
+                        old_id = msg_ids.get(str(gid))
+                        if old_id:
+                            try:
+                                bot.delete_message(int(gid), int(old_id))
+                            except Exception:
+                                pass
+
+                        sent = bot.send_message(int(gid), rec["text"])
+                        msg_ids[str(gid)] = sent.message_id
+                    except Exception:
+                        pass
+
+                save_db(db)
+        except Exception as e:
+            print(f"[RECURRING WORKER ERROR] {e}", flush=True)
+
+threading.Thread(target=recurring_message_worker, daemon=True).start()
+
+# ----------------- COMMAND SCOPES SETUP -----------------
 def setup_bot_commands():
     try:
         scopes_to_clear = [
@@ -213,10 +250,9 @@ def setup_bot_commands():
             types.BotCommand("unban", "Unban a user [reply/id/username]"),
             types.BotCommand("info", "Show user information"),
             types.BotCommand("matchmaker", "Calculate love match [reply/mention]"),
-            types.BotCommand("kundli", "Get daily fun horoscope & roast")
+            types.BotCommand("kundli", "Get daily horoscope prediction")
         ]
         bot.set_my_commands(group_cmds, scope=types.BotCommandScopeAllGroupChats())
-        print("[BOT] Old commands killed & new scopes registered successfully.", flush=True)
     except Exception as e:
         print(f"[BOT] Command setup failed: {e}", flush=True)
 
@@ -297,6 +333,27 @@ def resolve_target_id(target_str):
             return int(u["id"])
     return None
 
+def is_channel_or_group_username(uname):
+    uname_clean = uname.replace("@", "").strip().lower()
+    if uname_clean in known_entities_cache:
+        return known_entities_cache[uname_clean]
+    
+    for u in db.get("users", {}).values():
+        if u.get("username", "").lower().replace("@", "") == uname_clean:
+            known_entities_cache[uname_clean] = False
+            return False
+
+    try:
+        chat = bot.get_chat(f"@{uname_clean}")
+        if chat.type in ['channel', 'group', 'supergroup']:
+            known_entities_cache[uname_clean] = True
+            return True
+        known_entities_cache[uname_clean] = False
+        return False
+    except Exception:
+        known_entities_cache[uname_clean] = False
+        return False
+
 def send_with_optional_media(chat_id, media_key, text, reply_markup=None):
     media_id = db.get("media", {}).get(media_key)
     if media_id:
@@ -337,11 +394,13 @@ def get_appeal_target_markup():
 def get_admin_panel_markup():
     m_status = "ON" if db.get("settings", {}).get("maintenance", False) else "OFF"
     n_status = "ON" if db.get("settings", {}).get("new_user_notify", True) else "OFF"
+    rec_status = "ON" if db.get("recurring_msg", {}).get("enabled", False) else "OFF"
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("Mailing", callback_data="adm_mailing_select"),
         types.InlineKeyboardButton("Statistics", callback_data="adm_stats"),
+        types.InlineKeyboardButton(f"Auto Msg ({rec_status})", callback_data="adm_recurring_menu"),
         types.InlineKeyboardButton("Manage Media", callback_data="adm_media_menu"),
         types.InlineKeyboardButton("Banned Words", callback_data="adm_banned_words"),
         types.InlineKeyboardButton(f"Maint. ({m_status})", callback_data="toggle_maintenance"),
@@ -454,16 +513,12 @@ def cmd_matchmaker(message):
 def cmd_kundli(message):
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
     t_tag = get_user_mention(target.id, target.first_name, target.username)
-
     prediction = random.choice(KUNDLI_PREDICTIONS)
-    score = random.randint(20, 100)
 
     kundli_card = (
         f"<b>Dainik Kundli:</b>\n"
         f"User: {t_tag}\n\n"
-        f"<b>Prediction:</b>\n"
-        f"\"{prediction}\"\n\n"
-        f"• Score: <b>{score}/100</b>"
+        f"\"{prediction}\""
     )
     bot.reply_to(message, kundli_card)
 
@@ -488,8 +543,12 @@ def cmd_warn(message):
     uname = get_user_mention(target.id, target.first_name, target.username)
 
     if curr_warns < 3:
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data=f"warn_opt_{target.id}_{chat.id}"))
+        markup = types.InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            types.InlineKeyboardButton("+1", callback_data=f"w_add_{target.id}_{chat.id}"),
+            types.InlineKeyboardButton("-1", callback_data=f"w_sub_{target.id}_{chat.id}"),
+            types.InlineKeyboardButton("Cancel", callback_data=f"warn_opt_{target.id}_{chat.id}")
+        )
         warn_msg = f"{uname} [{target.id}] warned ({curr_warns} of 3)."
         send_with_optional_media(chat.id, "warn", warn_msg, markup)
     else:
@@ -587,13 +646,19 @@ def cmd_unmute(message):
         bot.reply_to(message, "Usage: Reply to a user's message or send <code>/unmute username/id</code>")
         return
 
+    # Reset warnings on unmute
+    key = f"{target.id}_{chat.id}"
+    db.get("warnings", {}).pop(key, None)
+    user_warn_cache.pop(key, None)
+    save_db(db)
+
     uname = get_user_mention(target.id, target.first_name, target.username)
     try:
         bot.restrict_chat_member(
             chat.id, target.id,
             can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True
         )
-        bot.send_message(chat.id, f"{uname} [{target.id}] has been unmuted.")
+        bot.send_message(chat.id, f"{uname} [{target.id}] has been unmuted and warnings reset.")
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
 
@@ -652,10 +717,15 @@ def cmd_unban(message):
         bot.reply_to(message, "Usage: Reply to a user's message or send <code>/unban username/id</code>")
         return
 
+    key = f"{target.id}_{chat.id}"
+    db.get("warnings", {}).pop(key, None)
+    user_warn_cache.pop(key, None)
+    save_db(db)
+
     uname = get_user_mention(target.id, target.first_name, target.username)
     try:
         bot.unban_chat_member(chat.id, target.id, only_if_banned=True)
-        bot.send_message(chat.id, f"{uname} [{target.id}] has been unbanned.")
+        bot.send_message(chat.id, f"{uname} [{target.id}] has been unbanned and warnings reset.")
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
 
@@ -720,7 +790,18 @@ def handle_group_moderation(message):
         except Exception:
             pass
 
-    # 3. Banned Words Filter
+    # 3. Channel/Group Username Filter (Only Person Usernames Allowed)
+    usernames_found = re.findall(r"@([a-zA-Z0-9_]{4,32})", text)
+    if usernames_found:
+        for u in usernames_found:
+            if is_channel_or_group_username(u):
+                try:
+                    bot.delete_message(chat.id, message.message_id)
+                    return
+                except Exception:
+                    pass
+
+    # 4. Banned Words Filter
     for word in db.get("banned_words", []):
         if word in text.lower():
             try:
@@ -729,7 +810,7 @@ def handle_group_moderation(message):
             except Exception:
                 pass
 
-    # 4. Anti-Flood: 4th message deleted instantly
+    # 5. Anti-Flood: 4th message deleted instantly
     now = time.time()
     user_history = user_message_history.setdefault(user.id, [])
     user_history.append(now)
@@ -751,8 +832,12 @@ def handle_group_moderation(message):
         uname = get_user_mention(user.id, user.first_name, user.username)
 
         if curr_warns < 3:
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("Cancel", callback_data=f"warn_opt_{user.id}_{chat.id}"))
+            markup = types.InlineKeyboardMarkup(row_width=3)
+            markup.add(
+                types.InlineKeyboardButton("+1", callback_data=f"w_add_{user.id}_{chat.id}"),
+                types.InlineKeyboardButton("-1", callback_data=f"w_sub_{user.id}_{chat.id}"),
+                types.InlineKeyboardButton("Cancel", callback_data=f"warn_opt_{user.id}_{chat.id}")
+            )
             warn_msg = f"{uname} [{user.id}] warned ({curr_warns} of 3)."
             send_with_optional_media(chat.id, "warn", warn_msg, markup)
         else:
@@ -808,6 +893,50 @@ def handle_private_dialogue(message):
             )
         else:
             bot.reply_to(message, "Incorrect authorization key.")
+        return
+
+    # Recurring Message Setup Flow
+    if state == "rec_step1_text":
+        admin_state[user_id] = f"rec_step2_interval_{text}"
+        bot.reply_to(
+            message,
+            "<b>Set Time Interval:</b>\n"
+            "Enter the gap between messages (e.g., <code>10m</code> for 10 minutes, <code>2h</code> for 2 hours):"
+        )
+        return
+
+    if state.startswith("rec_step2_interval_"):
+        raw_text = state.replace("rec_step2_interval_", "")
+        admin_state.pop(user_id, None)
+
+        input_val = text.strip().lower()
+        interval_min = 10
+        if input_val.endswith("h"):
+            try:
+                interval_min = int(input_val.replace("h", "")) * 60
+            except Exception:
+                interval_min = 60
+        elif input_val.endswith("m"):
+            try:
+                interval_min = int(input_val.replace("m", ""))
+            except Exception:
+                interval_min = 10
+        elif input_val.isdigit():
+            interval_min = int(input_val)
+
+        db["recurring_msg"] = {
+            "text": raw_text,
+            "interval_min": max(1, interval_min),
+            "enabled": True,
+            "last_sent": time.time(),
+            "last_msg_ids": {}
+        }
+        save_db(db)
+        bot.reply_to(
+            message,
+            f"<b>Recurring Message Activated:</b>\n• Interval: <code>{interval_min} minutes</code>\n• Text: {raw_text}",
+            reply_markup=get_admin_panel_markup()
+        )
         return
 
     # Appeal Explanation Processing
@@ -866,7 +995,6 @@ def handle_private_dialogue(message):
         }
         save_db(db)
 
-        # Forward Card to Central Group (@appealreport)
         appeal_card = (
             f"<b>NEW APPEAL CASE [ID: #{appeal_id}]</b>\n\n"
             f"• <b>User:</b> {u_tag} [<code>{user_id}</code>]\n"
@@ -955,7 +1083,6 @@ def handle_private_dialogue(message):
         }
         save_db(db)
 
-        # Forward Report Card to Central Group (@appealreport)
         report_card = (
             f"<b>NEW SCAM REPORT [CASE #{report_id}]</b>\n\n"
             f"• <b>Reported Scammer:</b> <code>{rep_data.get('target')}</code>\n"
@@ -1186,7 +1313,12 @@ def handle_all_callbacks(call):
             cid = appeal.get("chat_id")
             t_user_tag = get_user_mention(target_uid, appeal.get("name", "User"), appeal.get("username"))
 
+            # Reset warnings for user in that chat
             if cid:
+                key = f"{target_uid}_{cid}"
+                db.get("warnings", {}).pop(key, None)
+                user_warn_cache.pop(key, None)
+                save_db(db)
                 try:
                     if action_mode == "ban":
                         bot.unban_chat_member(int(cid), int(target_uid), only_if_banned=True)
@@ -1205,7 +1337,7 @@ def handle_all_callbacks(call):
             try:
                 bot.send_message(
                     target_uid,
-                    f"Hello {t_user_tag},\n\nGood news! Your appeal for <b>{appeal.get('target')}</b> has been <b>approved</b>! Your restriction has been lifted.",
+                    f"Hello {t_user_tag},\n\nGood news! Your appeal for <b>{appeal.get('target')}</b> has been <b>approved</b>! Your restriction has been lifted and warnings reset.",
                     reply_markup=markup
                 )
             except Exception:
@@ -1296,43 +1428,83 @@ def handle_all_callbacks(call):
         )
         return
 
-    # Group Warn In-line Buttons
+    # Group Warn In-line Buttons (+1 / -1 / Cancel)
     if data.startswith("warn_opt_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
             bot.answer_callback_query(call.id, "Admin authorization required.", show_alert=True)
             return
 
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("+1", callback_data=f"w_add_{target_uid}_{target_cid}"),
-            types.InlineKeyboardButton("-1", callback_data=f"w_sub_{target_uid}_{target_cid}")
-        )
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        try:
+            bot.delete_message(int(target_cid), call.message.message_id)
+        except Exception:
+            pass
         return
 
     if data.startswith("w_add_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
+            bot.answer_callback_query(call.id, "Admin authorization required.", show_alert=True)
             return
         key = f"{target_uid}_{target_cid}"
         count = db.get("warnings", {}).get(key, 0) + 1
         db.setdefault("warnings", {})[key] = count
         user_warn_cache[key] = count
         save_db(db)
-        bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
+
+        uname = f"User [{target_uid}]"
+        if str(target_uid) in db.get("users", {}):
+            u_obj = db["users"][str(target_uid)]
+            uname = get_user_mention(int(target_uid), u_obj.get("name", "User"), u_obj.get("username"))
+
+        if count < 3:
+            markup = types.InlineKeyboardMarkup(row_width=3)
+            markup.add(
+                types.InlineKeyboardButton("+1", callback_data=f"w_add_{target_uid}_{target_cid}"),
+                types.InlineKeyboardButton("-1", callback_data=f"w_sub_{target_uid}_{target_cid}"),
+                types.InlineKeyboardButton("Cancel", callback_data=f"warn_opt_{target_uid}_{target_cid}")
+            )
+            bot.edit_message_text(f"{uname} warned ({count} of 3).", int(target_cid), call.message.message_id, reply_markup=markup)
+        else:
+            db["warnings"].pop(key, None)
+            user_warn_cache.pop(key, None)
+            save_db(db)
+            try:
+                bot.restrict_chat_member(int(target_cid), int(target_uid), can_send_messages=False)
+            except Exception:
+                pass
+            bot_user = bot.get_me().username
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("Appeal", url=f"https://t.me/{bot_user}?start=appeal"),
+                types.InlineKeyboardButton("Unmute", callback_data=f"act_unmute_{target_uid}_{target_cid}")
+            )
+            bot.edit_message_text(f"{uname} has been muted (3 Warnings Reached).", int(target_cid), call.message.message_id, reply_markup=markup)
         return
 
     if data.startswith("w_sub_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
+            bot.answer_callback_query(call.id, "Admin authorization required.", show_alert=True)
             return
         key = f"{target_uid}_{target_cid}"
         count = max(0, db.get("warnings", {}).get(key, 0) - 1)
         db.setdefault("warnings", {})[key] = count
         user_warn_cache[key] = count
         save_db(db)
-        bot.edit_message_text(f"Updated: User [{target_uid}] warnings ({count} of 3).", call.message.chat.id, call.message.message_id)
+
+        uname = f"User [{target_uid}]"
+        if str(target_uid) in db.get("users", {}):
+            u_obj = db["users"][str(target_uid)]
+            uname = get_user_mention(int(target_uid), u_obj.get("name", "User"), u_obj.get("username"))
+
+        markup = types.InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            types.InlineKeyboardButton("+1", callback_data=f"w_add_{target_uid}_{target_cid}"),
+            types.InlineKeyboardButton("-1", callback_data=f"w_sub_{target_uid}_{target_cid}"),
+            types.InlineKeyboardButton("Cancel", callback_data=f"warn_opt_{target_uid}_{target_cid}")
+        )
+        bot.edit_message_text(f"{uname} warned ({count} of 3).", int(target_cid), call.message.message_id, reply_markup=markup)
         return
 
     # Group Unban / Unmute Handlers
@@ -1342,8 +1514,12 @@ def handle_all_callbacks(call):
             bot.answer_callback_query(call.id, "Admin authorization required.", show_alert=True)
             return
         try:
+            key = f"{target_uid}_{target_cid}"
+            db.get("warnings", {}).pop(key, None)
+            user_warn_cache.pop(key, None)
+            save_db(db)
             bot.unban_chat_member(int(target_cid), int(target_uid), only_if_banned=True)
-            bot.edit_message_text(f"User [{target_uid}] unbanned by {call.from_user.first_name}.", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text(f"User [{target_uid}] unbanned and warnings reset by {call.from_user.first_name}.", call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
         return
@@ -1354,11 +1530,15 @@ def handle_all_callbacks(call):
             bot.answer_callback_query(call.id, "Admin authorization required.", show_alert=True)
             return
         try:
+            key = f"{target_uid}_{target_cid}"
+            db.get("warnings", {}).pop(key, None)
+            user_warn_cache.pop(key, None)
+            save_db(db)
             bot.restrict_chat_member(
                 int(target_cid), int(target_uid),
                 can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True
             )
-            bot.edit_message_text(f"User [{target_uid}] unmuted by {call.from_user.first_name}.", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text(f"User [{target_uid}] unmuted and warnings reset by {call.from_user.first_name}.", call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
         return
@@ -1392,6 +1572,60 @@ def handle_all_callbacks(call):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("Back", callback_data="adm_back"))
         bot.edit_message_text(stats_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # Recurring Message Setup Submenu
+    if data == "adm_recurring_menu":
+        rec = db.get("recurring_msg", {})
+        status = "Enabled" if rec.get("enabled") else "Disabled"
+        interval = rec.get("interval_min", 0)
+        curr_text = rec.get("text") or "None"
+
+        rec_panel = (
+            "<b>Auto Recurring Message Manager:</b>\n\n"
+            f"• Status: <code>{status}</code>\n"
+            f"• Interval: <code>{interval} mins</code>\n"
+            f"• Current Text:\n<i>\"{curr_text}\"</i>"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Set Message & Time", callback_data="adm_rec_set"),
+            types.InlineKeyboardButton("Toggle ON/OFF", callback_data="adm_rec_toggle"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(rec_panel, call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_rec_set":
+        admin_state[user_id] = "rec_step1_text"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_recurring_menu"))
+        bot.edit_message_text("Step 1: Send the message text you want to auto-post in groups:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_rec_toggle":
+        curr = db.setdefault("recurring_msg", {}).get("enabled", False)
+        db["recurring_msg"]["enabled"] = not curr
+        save_db(db)
+        bot.answer_callback_query(call.id, f"Auto message is now {'Enabled' if not curr else 'Disabled'}.")
+        # Reload panel
+        rec = db.get("recurring_msg", {})
+        status = "Enabled" if rec.get("enabled") else "Disabled"
+        interval = rec.get("interval_min", 0)
+        curr_text = rec.get("text") or "None"
+        rec_panel = (
+            "<b>Auto Recurring Message Manager:</b>\n\n"
+            f"• Status: <code>{status}</code>\n"
+            f"• Interval: <code>{interval} mins</code>\n"
+            f"• Current Text:\n<i>\"{curr_text}\"</i>"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Set Message & Time", callback_data="adm_rec_set"),
+            types.InlineKeyboardButton("Toggle ON/OFF", callback_data="adm_rec_toggle"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(rec_panel, call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     # Banned Words Submenu
