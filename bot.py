@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import re
+import random
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
@@ -19,12 +20,12 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 ADMIN_SECRET_KEY = "mansour$vx"
 
 if not BOT_TOKEN:
-    print("[ERROR] BOT_TOKEN missing!", flush=True)
+    print("[ERROR] BOT_TOKEN missing in environment variables!", flush=True)
     sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", disable_web_page_preview=True)
 
-# ----------------- 24/7 WEB SERVER FOR RENDER -----------------
+# ----------------- 24/7 WEB SERVER FOR RENDER / UPTIMEROBOT -----------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -1024,7 +1025,6 @@ def handle_all_callbacks(call):
             db["banned_words"] = words
             save_db(db)
             bot.answer_callback_query(call.id, f"Removed '{removed}' from blacklist.")
-        # Reload delete list
         words = db.get("banned_words", [])
         markup = types.InlineKeyboardMarkup(row_width=2)
         for i, w in enumerate(words):
@@ -1145,14 +1145,28 @@ def handle_all_callbacks(call):
         bot.edit_message_text("<b>Administrator Control Panel</b>\nChoose a category below to manage settings:", call.message.chat.id, call.message.message_id, reply_markup=get_admin_panel_markup())
         return
 
-# ----------------- ENTRYPOINT & POLLING -----------------
+# ----------------- ROBUST POLLING LOOP (AUTO CONFLICT RESOLVER) -----------------
+def start_safe_polling():
+    while True:
+        try:
+            print("[BOT] Attempting Telegram connection...", flush=True)
+            try:
+                bot.remove_webhook()
+            except Exception:
+                pass
+            setup_bot_commands()
+            time.sleep(1)
+            print("[BOT] Infinity Polling active and listening.", flush=True)
+            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+        except Exception as err:
+            err_str = str(err).lower()
+            if "409" in err_str or "conflict" in err_str:
+                wait_time = random.randint(5, 10)
+                print(f"[BOT CONFLICT DETECTED] Overlapping deploy instance detected. Waiting {wait_time}s for cleanup...", flush=True)
+                time.sleep(wait_time)
+            else:
+                print(f"[BOT POLLING ERROR] {err}. Reconnecting in 5s...", flush=True)
+                time.sleep(5)
+
 if __name__ == "__main__":
-    try:
-        me = bot.get_me()
-        print(f"[BOT] Connected successfully as @{me.username} (ID: {me.id})", flush=True)
-        bot.remove_webhook()
-        setup_bot_commands()
-        time.sleep(1)
-        bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
-    except Exception as e:
-        print(f"[BOT FATAL ERROR] {e}", flush=True)
+    start_safe_polling()
