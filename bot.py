@@ -35,7 +35,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Moderation & Support Bot is Live 24/7")
+        self.wfile.write(b"Moderation Bot Active 24/7")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -71,9 +71,9 @@ def init_postgres():
                         data JSONB NOT NULL
                     );
                 """)
-        print("[DATABASE] PostgreSQL storage ready.", flush=True)
+        print("[DATABASE] PostgreSQL ready.", flush=True)
     except Exception as e:
-        print(f"[DATABASE ERROR] Init failed: {e}", flush=True)
+        print(f"[DATABASE ERROR] {e}", flush=True)
 
 def get_default_db_data():
     return {
@@ -85,25 +85,11 @@ def get_default_db_data():
         "restrictions": {},
         "banned_words": ["gali", "madarchod", "bhenchod", "bhosdike", "chutiya", "randi"],
         "custom_replies": {},
+        "recurring_tasks": {},
         "appeals": {},
         "reports": {},
-        "recurring_msg": {
-            "text": None,
-            "interval_min": 0,
-            "enabled": False,
-            "last_sent": 0,
-            "last_msg_ids": {}
-        },
-        "media": {
-            "start": None,
-            "ban": None,
-            "mute": None,
-            "warn": None
-        },
-        "settings": {
-            "maintenance": False,
-            "new_user_notify": True
-        }
+        "media": {"start": None, "ban": None, "mute": None, "warn": None},
+        "settings": {"maintenance": False, "new_user_notify": True}
     }
 
 def save_db(data):
@@ -134,10 +120,6 @@ def load_db():
                     for k, v in default_data.items():
                         if k not in data:
                             data[k] = v
-                    if "recurring_msg" not in data:
-                        data["recurring_msg"] = default_data["recurring_msg"]
-                    if "custom_replies" not in data:
-                        data["custom_replies"] = {}
                     if OWNER_ID and OWNER_ID not in data.get("admins", []):
                         data.setdefault("admins", []).append(OWNER_ID)
                     return data
@@ -159,7 +141,7 @@ report_wizard_state = {}
 known_entities_cache = {}
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# ----------------- KUNDLI PREDICTIONS LIST -----------------
+# ----------------- KUNDLI PREDICTIONS -----------------
 KUNDLI_PREDICTIONS = [
     "Aaj group mein crush se reply aane ke poore chance hain.",
     "Shani bhaari hai, aaj admin se warn lagne ke 99% aasaar hain.",
@@ -184,35 +166,40 @@ KUNDLI_PREDICTIONS = [
     "Aapke sitaare buland hain, aaj crypto aur trading me fayda hoga."
 ]
 
-# ----------------- RECURRING MESSAGE BACKGROUND THREAD -----------------
+# ----------------- MULTI-GROUP RECURRING MESSAGE WORKER -----------------
 def recurring_message_worker():
     while True:
         try:
-            time.sleep(30)
-            rec = db.get("recurring_msg", {})
-            if not rec.get("enabled") or not rec.get("text") or rec.get("interval_min", 0) <= 0:
-                continue
-
-            interval_sec = rec["interval_min"] * 60
+            time.sleep(20)
+            tasks = db.get("recurring_tasks", {})
             now = time.time()
-            if now - rec.get("last_sent", 0) >= interval_sec:
-                rec["last_sent"] = now
-                msg_ids = rec.setdefault("last_msg_ids", {})
+            changed = False
 
-                for gid in list(db.get("groups", {}).keys()):
+            for task_id, tdata in list(tasks.items()):
+                if not tdata.get("enabled", True):
+                    continue
+                interval_sec = tdata.get("interval_min", 30) * 60
+                if now - tdata.get("last_sent", 0) >= interval_sec:
+                    tdata["last_sent"] = now
+                    changed = True
+                    target_gid = tdata.get("group_id")
+                    
+                    # Delete previous message of this specific recurring task
+                    old_mid = tdata.get("last_msg_id")
+                    if old_mid and target_gid:
+                        try:
+                            bot.delete_message(int(target_gid), int(old_mid))
+                        except Exception:
+                            pass
+
+                    # Post new recurring message
                     try:
-                        old_id = msg_ids.get(str(gid))
-                        if old_id:
-                            try:
-                                bot.delete_message(int(gid), int(old_id))
-                            except Exception:
-                                pass
-
-                        sent = bot.send_message(int(gid), rec["text"])
-                        msg_ids[str(gid)] = sent.message_id
+                        sent = bot.send_message(int(target_gid), tdata.get("text", ""))
+                        tdata["last_msg_id"] = sent.message_id
                     except Exception:
                         pass
 
+            if changed:
                 save_db(db)
         except Exception as e:
             print(f"[RECURRING WORKER ERROR] {e}", flush=True)
@@ -236,13 +223,14 @@ def setup_bot_commands():
         
         time.sleep(1)
 
+        # Private Scope (/claim is strictly HIDDEN from menu)
         private_cmds = [
             types.BotCommand("start", "Open Support Portal"),
-            types.BotCommand("claim", "Verify secret admin key"),
             types.BotCommand("admin", "Open Administrator Panel")
         ]
         bot.set_my_commands(private_cmds, scope=types.BotCommandScopeAllPrivateChats())
 
+        # Group Scope
         group_cmds = [
             types.BotCommand("warn", "Warn a user [reply/id/username]"),
             types.BotCommand("unwarn", "Remove user warning"),
@@ -396,14 +384,13 @@ def get_appeal_target_markup():
 def get_admin_panel_markup():
     m_status = "ON" if db.get("settings", {}).get("maintenance", False) else "OFF"
     n_status = "ON" if db.get("settings", {}).get("new_user_notify", True) else "OFF"
-    rec_status = "ON" if db.get("recurring_msg", {}).get("enabled", False) else "OFF"
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("Mailing", callback_data="adm_mailing_select"),
         types.InlineKeyboardButton("Statistics", callback_data="adm_stats"),
-        types.InlineKeyboardButton(f"Auto Msg ({rec_status})", callback_data="adm_recurring_menu"),
-        types.InlineKeyboardButton("Custom Replies", callback_data="adm_custom_replies_menu"),
+        types.InlineKeyboardButton("Recurring Msg", callback_data="adm_rec_tasks_menu"),
+        types.InlineKeyboardButton("Custom Replies", callback_data="adm_cr_main_menu"),
         types.InlineKeyboardButton("Manage Media", callback_data="adm_media_menu"),
         types.InlineKeyboardButton("Banned Words", callback_data="adm_banned_words"),
         types.InlineKeyboardButton(f"Maint. ({m_status})", callback_data="toggle_maintenance"),
@@ -456,7 +443,7 @@ def handle_claim_command(message):
 @bot.message_handler(commands=['admin'], chat_types=['private'])
 def handle_admin_command(message):
     if not is_admin_or_owner(message.from_user.id):
-        bot.reply_to(message, "Access Denied. Send <code>/claim</code> to authenticate first.")
+        bot.reply_to(message, "Access Denied. Authenticate first.")
         return
     bot.reply_to(message, "<b>Administrator Control Panel</b>\nSelect an option below to manage settings:", reply_markup=get_admin_panel_markup())
 
@@ -768,16 +755,18 @@ def handle_group_moderation(message):
 
     is_user_adm = is_group_admin(chat.id, user.id)
 
-    # 1. Custom Triggers
+    # 1. Group-Specific & Global Custom Replies
     if text:
         custom_dict = db.get("custom_replies", {})
-        for trigger, cdata in custom_dict.items():
-            if trigger in text.lower():
-                markup = types.InlineKeyboardMarkup()
-                if cdata.get("btn_name") and cdata.get("btn_url"):
-                    markup.add(types.InlineKeyboardButton(cdata["btn_name"], url=cdata["btn_url"]))
-                bot.reply_to(message, cdata["reply_text"], reply_markup=markup if cdata.get("btn_name") else None)
-                break
+        for r_id, cdata in custom_dict.items():
+            target_gid = cdata.get("group_id", "all")
+            if target_gid == "all" or str(target_gid) == str(chat.id):
+                if cdata.get("trigger", "").lower() in text.lower():
+                    markup = types.InlineKeyboardMarkup()
+                    if cdata.get("btn_name") and cdata.get("btn_url"):
+                        markup.add(types.InlineKeyboardButton(cdata["btn_name"], url=cdata["btn_url"]))
+                    bot.reply_to(message, cdata["reply_text"], reply_markup=markup if cdata.get("btn_name") else None)
+                    break
 
     if is_user_adm:
         return
@@ -811,7 +800,7 @@ def handle_group_moderation(message):
             except Exception:
                 pass
 
-    # 5. Anti-Flood: 4th message deleted instantly
+    # 5. Anti-Flood System
     now = time.time()
     user_history = user_message_history.setdefault(user.id, [])
     user_history.append(now)
@@ -896,22 +885,23 @@ def handle_private_dialogue(message):
             bot.reply_to(message, "Incorrect authorization key.")
         return
 
-    # Recurring Message Setup Flow
-    if state == "rec_step1_text":
-        admin_state[user_id] = f"rec_step2_interval_{text}"
+    # Multi-Group Recurring Message Flow
+    if state.startswith("rec_step2_msg_"):
+        gid = state.replace("rec_step2_msg_", "")
+        admin_state[user_id] = f"rec_step3_time_{gid}__SPLIT__{text}"
         bot.reply_to(
             message,
-            "<b>Set Time Interval:</b>\n"
-            "Enter the gap between messages (e.g., <code>10m</code> for 10 minutes, <code>2h</code> for 2 hours):"
+            "<b>Set Time Gap:</b>\nEnter the interval (e.g., <code>10m</code> for 10 minutes, <code>2h</code> for 2 hours):"
         )
         return
 
-    if state.startswith("rec_step2_interval_"):
-        raw_text = state.replace("rec_step2_interval_", "")
+    if state.startswith("rec_step3_time_"):
+        raw_payload = state.replace("rec_step3_time_", "")
+        gid, msg_text = raw_payload.split("__SPLIT__")
         admin_state.pop(user_id, None)
 
         input_val = text.strip().lower()
-        interval_min = 10
+        interval_min = 30
         if input_val.endswith("h"):
             try:
                 interval_min = int(input_val.replace("h", "")) * 60
@@ -921,53 +911,93 @@ def handle_private_dialogue(message):
             try:
                 interval_min = int(input_val.replace("m", ""))
             except Exception:
-                interval_min = 10
+                interval_min = 30
         elif input_val.isdigit():
             interval_min = int(input_val)
 
-        db["recurring_msg"] = {
-            "text": raw_text,
+        task_id = str(int(time.time()))
+        g_title = db.get("groups", {}).get(str(gid), {}).get("title", f"Group {gid}")
+
+        db.setdefault("recurring_tasks", {})[task_id] = {
+            "group_id": str(gid),
+            "group_title": g_title,
+            "text": msg_text,
             "interval_min": max(1, interval_min),
             "enabled": True,
-            "last_sent": time.time(),
-            "last_msg_ids": {}
+            "last_sent": 0,
+            "last_msg_id": None
         }
         save_db(db)
         bot.reply_to(
             message,
-            f"<b>Recurring Message Activated:</b>\n• Interval: <code>{interval_min} minutes</code>\n• Text: {raw_text}",
+            f"<b>Recurring Message Configured:</b>\n• Group: <b>{g_title}</b>\n• Interval: <code>{interval_min} mins</code>\n• Text: {msg_text}",
             reply_markup=get_admin_panel_markup()
         )
+        return
+
+    # Group-Specific Custom Reply Flow
+    if state.startswith("cr_step2_trigger_"):
+        gid = state.replace("cr_step2_trigger_", "")
+        admin_state[user_id] = f"cr_step3_text_{gid}__SPLIT__{text.lower().strip()}"
+        bot.reply_to(message, f"Trigger set: <code>{text.lower().strip()}</code>\n\nSend the reply message text:")
+        return
+
+    if state.startswith("cr_step3_text_"):
+        raw_payload = state.replace("cr_step3_text_", "")
+        gid, trigger = raw_payload.split("__SPLIT__")
+        admin_state[user_id] = f"cr_step4_btn_{gid}__SPLIT__{trigger}__SPLIT__{text}"
+        bot.reply_to(message, "Optional Button: Send <code>Button Name | https://link.com</code>\nOr type <code>skip</code> for text only:")
+        return
+
+    if state.startswith("cr_step4_btn_"):
+        raw_payload = state.replace("cr_step4_btn_", "")
+        gid, trigger, reply_txt = raw_payload.split("__SPLIT__")
+        admin_state.pop(user_id, None)
+
+        btn_name, btn_url = None, None
+        if text.lower() != "skip" and "|" in text:
+            p = text.split("|")
+            btn_name = p[0].strip()
+            btn_url = p[1].strip()
+
+        r_id = str(int(time.time()))
+        db.setdefault("custom_replies", {})[r_id] = {
+            "group_id": str(gid),
+            "trigger": trigger,
+            "reply_text": reply_txt,
+            "btn_name": btn_name,
+            "btn_url": btn_url
+        }
+        save_db(db)
+        bot.reply_to(message, f"Custom reply for '<code>{trigger}</code>' saved successfully.", reply_markup=get_admin_panel_markup())
         return
 
     # Appeal Explanation Processing
     if state.startswith("submitting_appeal_"):
         target_group = state.replace("submitting_appeal_", "")
 
-        # 1. Profanity check
         for bw in db.get("banned_words", []):
             if bw in text.lower():
                 bot.reply_to(
                     message,
-                    f"{u_tag}, <b>Appeal Rejected:</b>\nAbusive language is strictly prohibited. Please rewrite your explanation politely:"
+                    f"{u_tag}, <b>Appeal Rejected:</b>\nAbusive language is prohibited. Please rewrite politely:"
                 )
                 return
 
-        # 2. Length check
         words_count = len(text.split())
         char_count = len(text.strip())
 
         if char_count < 50:
             bot.reply_to(
                 message,
-                f"{u_tag}, <b>Appeal Too Short:</b>\nYour statement has {char_count} characters. Please provide between 50 characters and 150 words:"
+                f"{u_tag}, <b>Appeal Too Short:</b>\nYour statement has {char_count} characters. Minimum 50 required:"
             )
             return
 
         if words_count > 150:
             bot.reply_to(
                 message,
-                f"{u_tag}, <b>Appeal Exceeds Limit:</b>\nYour statement has {words_count} words (Maximum: 150 words). Please make it concise:"
+                f"{u_tag}, <b>Appeal Exceeds Limit:</b>\nMaximum 150 words allowed. Please summarize:"
             )
             return
 
@@ -1041,7 +1071,7 @@ def handle_private_dialogue(message):
         admin_state[user_id] = "rep_step2_amount"
         bot.reply_to(
             message,
-            f"{u_tag}, <b>Step 2: Deal Amount:</b>\nEnter the scammed amount/value (e.g. <code>$50</code>, <code>₹2500</code>) or send <code>/skip</code> if not applicable:"
+            f"{u_tag}, <b>Step 2: Deal Amount:</b>\nEnter the scammed amount (e.g. <code>$50</code>, <code>₹2500</code>) or send <code>/skip</code>:"
         )
         return
 
@@ -1143,38 +1173,6 @@ def handle_private_dialogue(message):
             bot.reply_to(message, f"Media for <b>{media_type.upper()}</b> updated successfully.", reply_markup=get_admin_panel_markup())
         else:
             bot.reply_to(message, "No valid photo, video or GIF detected.", reply_markup=get_admin_panel_markup())
-        return
-
-    # Custom Reply Flow
-    if state == "cr_step1_trigger":
-        admin_state[user_id] = f"cr_step2_text_{text.lower().strip()}"
-        bot.reply_to(message, f"Trigger set: <code>{text.lower().strip()}</code>\n\nStep 2: Send the reply text:")
-        return
-
-    if state.startswith("cr_step2_text_"):
-        trigger = state.replace("cr_step2_text_", "")
-        admin_state[user_id] = f"cr_step3_btn_{trigger}__SPLIT__{text}"
-        bot.reply_to(message, "Step 3: To attach a button: <code>Button Title | https://link.com</code>\nOr type <code>skip</code> for text only.")
-        return
-
-    if state.startswith("cr_step3_btn_"):
-        raw_payload = state.replace("cr_step3_btn_", "")
-        trigger, reply_txt = raw_payload.split("__SPLIT__")
-        admin_state.pop(user_id, None)
-
-        btn_name, btn_url = None, None
-        if text.lower() != "skip" and "|" in text:
-            p = text.split("|")
-            btn_name = p[0].strip()
-            btn_url = p[1].strip()
-
-        db.setdefault("custom_replies", {})[trigger] = {
-            "reply_text": reply_txt,
-            "btn_name": btn_name,
-            "btn_url": btn_url
-        }
-        save_db(db)
-        bot.reply_to(message, f"Custom auto-reply for '<code>{trigger}</code>' saved successfully.", reply_markup=get_admin_panel_markup())
         return
 
     # Broadcast Flow
@@ -1279,7 +1277,7 @@ def handle_all_callbacks(call):
         bot.edit_message_text(status_card, call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
-    # Appeal Decisions in Central Group (@appealreport)
+    # Appeal Decisions (@appealreport)
     if data.startswith("app_rej_"):
         appeal_id = data.replace("app_rej_", "")
         appeal = db.get("appeals", {}).get(appeal_id)
@@ -1350,7 +1348,7 @@ def handle_all_callbacks(call):
             )
         return
 
-    # Scam Report Actions (@appealreport)
+    # Scam Report Decisions (@appealreport)
     if data.startswith("rep_posthub_"):
         report_id = data.replace("rep_posthub_", "")
         rep = db.get("reports", {}).get(report_id)
@@ -1428,7 +1426,7 @@ def handle_all_callbacks(call):
         )
         return
 
-    # Group Warn In-line Buttons (+1 / -1 / Cancel)
+    # Group Warn Buttons
     if data.startswith("warn_opt_"):
         _, _, target_uid, target_cid = data.split("_")
         if not is_group_admin(int(target_cid), user_id):
@@ -1543,7 +1541,7 @@ def handle_all_callbacks(call):
             bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
         return
 
-    # Master Admin Panel
+    # Master Admin Panel Handlers
     if not is_admin_or_owner(user_id):
         bot.answer_callback_query(call.id, "Access Denied.")
         return
@@ -1557,46 +1555,124 @@ def handle_all_callbacks(call):
         g_len = len(db.get("groups", {}))
         w_len = len(db.get("banned_words", []))
         c_len = len(db.get("custom_replies", {}))
-        a_len = len(db.get("appeals", {}))
-        r_len = len(db.get("reports", {}))
+        t_len = len(db.get("recurring_tasks", {}))
         stats_text = (
             "<b>Bot Analytics & Performance:</b>\n\n"
             f"• Registered Users: <code>{u_len}</code>\n"
             f"• Active Groups: <code>{g_len}</code>\n"
-            f"• Total Appeals Handled: <code>{a_len}</code>\n"
-            f"• Scam Reports Logged: <code>{r_len}</code>\n"
-            f"• Filtered Blacklist Words: <code>{w_len}</code>\n"
+            f"• Active Auto-Messages: <code>{t_len}</code>\n"
             f"• Custom Auto-Replies: <code>{c_len}</code>\n"
-            f"• Storage: <code>Neon PostgreSQL JSONB</code>"
+            f"• Filtered Words: <code>{w_len}</code>\n"
+            f"• Storage Engine: <code>Neon PostgreSQL JSONB</code>"
         )
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("Back", callback_data="adm_back"))
         bot.edit_message_text(stats_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
-    # Custom Replies Submenu (Add, Delete, See List)
-    if data == "adm_custom_replies_menu":
-        c_len = len(db.get("custom_replies", {}))
+    # Group-Specific Recurring Tasks Manager
+    if data == "adm_rec_tasks_menu":
+        tasks = db.get("recurring_tasks", {})
+        t_len = len(tasks)
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("Add Reply", callback_data="adm_cr_add"),
-            types.InlineKeyboardButton("Delete Reply", callback_data="adm_cr_del"),
-            types.InlineKeyboardButton("See List", callback_data="adm_cr_list"),
+            types.InlineKeyboardButton("Add Message to Group", callback_data="adm_rec_select_group"),
+            types.InlineKeyboardButton("Manage / Delete Messages", callback_data="adm_rec_del_menu"),
             types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
         )
         bot.edit_message_text(
-            f"<b>Custom Auto-Replies Manager:</b>\n\nActive Custom Triggers: <code>{c_len}</code>\nChoose an action below:",
+            f"<b>Group Recurring Messages Manager:</b>\n\nTotal Scheduled Tasks: <code>{t_len}</code>\nChoose an action:",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=markup
         )
         return
 
-    if data == "adm_cr_add":
-        admin_state[user_id] = "cr_step1_trigger"
+    if data == "adm_rec_select_group":
+        groups = db.get("groups", {})
+        if not groups:
+            bot.answer_callback_query(call.id, "No active groups found.", show_alert=True)
+            return
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for gid, gdata in groups.items():
+            markup.add(types.InlineKeyboardButton(gdata.get("title", f"Group {gid}"), callback_data=f"rec_set_gid_{gid}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_rec_tasks_menu"))
+        bot.edit_message_text("Select the group to schedule a recurring message:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("rec_set_gid_"):
+        gid = data.replace("rec_set_gid_", "")
+        admin_state[user_id] = f"rec_step2_msg_{gid}"
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_custom_replies_menu"))
-        bot.edit_message_text("<b>Custom Reply Setup:</b>\n\nStep 1: Send the trigger keyword or phrase:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_rec_tasks_menu"))
+        bot.edit_message_text("<b>Step 1:</b> Send the message text you want to auto-post:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data == "adm_rec_del_menu":
+        tasks = db.get("recurring_tasks", {})
+        if not tasks:
+            bot.answer_callback_query(call.id, "No recurring tasks found.", show_alert=True)
+            return
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for tid, tdata in tasks.items():
+            gtitle = tdata.get("group_title", "Group")
+            snip = tdata.get("text", "")[:20]
+            markup.add(types.InlineKeyboardButton(f"Remove: {gtitle} ({tdata.get('interval_min')}m) - {snip}...", callback_data=f"del_rectask_{tid}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_rec_tasks_menu"))
+        bot.edit_message_text("Select a recurring message to delete:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("del_rectask_"):
+        tid = data.replace("del_rectask_", "")
+        if tid in db.get("recurring_tasks", {}):
+            db["recurring_tasks"].pop(tid, None)
+            save_db(db)
+            bot.answer_callback_query(call.id, "Recurring message removed.")
+
+        tasks = db.get("recurring_tasks", {})
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for t_id, tdata in tasks.items():
+            gtitle = tdata.get("group_title", "Group")
+            snip = tdata.get("text", "")[:20]
+            markup.add(types.InlineKeyboardButton(f"Remove: {gtitle} ({tdata.get('interval_min')}m) - {snip}...", callback_data=f"del_rectask_{t_id}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_rec_tasks_menu"))
+        bot.edit_message_text("Select a recurring message to delete:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    # Group-Specific Custom Replies Menu
+    if data == "adm_cr_main_menu":
+        c_len = len(db.get("custom_replies", {}))
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("Add Reply", callback_data="adm_cr_select_group"),
+            types.InlineKeyboardButton("Delete Reply", callback_data="adm_cr_del"),
+            types.InlineKeyboardButton("See List", callback_data="adm_cr_list"),
+            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
+        )
+        bot.edit_message_text(
+            f"<b>Custom Auto-Replies Manager:</b>\n\nActive Custom Triggers: <code>{c_len}</code>\nChoose an action:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
+        )
+        return
+
+    if data == "adm_cr_select_group":
+        groups = db.get("groups", {})
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("🌐 All Groups (Global Trigger)", callback_data="cr_set_gid_all"))
+        for gid, gdata in groups.items():
+            markup.add(types.InlineKeyboardButton(gdata.get("title", f"Group {gid}"), callback_data=f"cr_set_gid_{gid}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_cr_main_menu"))
+        bot.edit_message_text("Select target scope for this custom trigger:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+
+    if data.startswith("cr_set_gid_"):
+        gid = data.replace("cr_set_gid_", "")
+        admin_state[user_id] = f"cr_step2_trigger_{gid}"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_cr_main_menu"))
+        bot.edit_message_text("<b>Step 1:</b> Send the trigger keyword or phrase:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     if data == "adm_cr_list":
@@ -1605,13 +1681,14 @@ def handle_all_callbacks(call):
             list_text = "<b>No Custom Replies Set.</b>"
         else:
             lines = []
-            for k, v in creplies.items():
-                btn_info = f" [Button: {v.get('btn_name')}]" if v.get("btn_name") else ""
-                lines.append(f"• <b>Trigger:</b> <code>{k}</code>\n  <b>Reply:</b> {v.get('reply_text')}{btn_info}")
+            for r_id, v in creplies.items():
+                gid = v.get("group_id", "all")
+                gtitle = "All Groups" if gid == "all" else db.get("groups", {}).get(str(gid), {}).get("title", f"Group {gid}")
+                lines.append(f"• <b>Scope:</b> {gtitle}\n  <b>Trigger:</b> <code>{v.get('trigger')}</code>\n  <b>Reply:</b> {v.get('reply_text')}")
             list_text = "<b>Active Custom Replies:</b>\n\n" + "\n\n".join(lines)
 
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies_menu"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_cr_main_menu"))
         bot.edit_message_text(list_text, call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
@@ -1620,80 +1697,30 @@ def handle_all_callbacks(call):
         if not creplies:
             bot.answer_callback_query(call.id, "No custom replies to delete.", show_alert=True)
             return
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for trig in list(creplies.keys()):
-            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies_menu"))
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for r_id, v in creplies.items():
+            gid = v.get("group_id", "all")
+            gtitle = "Global" if gid == "all" else db.get("groups", {}).get(str(gid), {}).get("title", f"Group {gid}")
+            markup.add(types.InlineKeyboardButton(f"Remove: [{gtitle}] {v.get('trigger')}", callback_data=f"del_cr_{r_id}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_cr_main_menu"))
         bot.edit_message_text("Select a custom reply trigger to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     if data.startswith("del_cr_"):
-        trig_to_del = data.replace("del_cr_", "")
-        if trig_to_del in db.get("custom_replies", {}):
-            db["custom_replies"].pop(trig_to_del, None)
+        r_id = data.replace("del_cr_", "")
+        if r_id in db.get("custom_replies", {}):
+            db["custom_replies"].pop(r_id, None)
             save_db(db)
-            bot.answer_callback_query(call.id, f"Deleted trigger: {trig_to_del}")
+            bot.answer_callback_query(call.id, "Custom reply removed.")
 
         creplies = db.get("custom_replies", {})
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for trig in list(creplies.keys()):
-            markup.add(types.InlineKeyboardButton(f"Remove: {trig}", callback_data=f"del_cr_{trig}"))
-        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_custom_replies_menu"))
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for rid, v in creplies.items():
+            gid = v.get("group_id", "all")
+            gtitle = "Global" if gid == "all" else db.get("groups", {}).get(str(gid), {}).get("title", f"Group {gid}")
+            markup.add(types.InlineKeyboardButton(f"Remove: [{gtitle}] {v.get('trigger')}", callback_data=f"del_cr_{rid}"))
+        markup.add(types.InlineKeyboardButton("Back", callback_data="adm_cr_main_menu"))
         bot.edit_message_text("Select a custom reply trigger to remove:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    # Recurring Message Submenu
-    if data == "adm_recurring_menu":
-        rec = db.get("recurring_msg", {})
-        status = "Enabled" if rec.get("enabled") else "Disabled"
-        interval = rec.get("interval_min", 0)
-        curr_text = rec.get("text") or "None"
-
-        rec_panel = (
-            "<b>Auto Recurring Message Manager:</b>\n\n"
-            f"• Status: <code>{status}</code>\n"
-            f"• Interval: <code>{interval} mins</code>\n"
-            f"• Current Text:\n<i>\"{curr_text}\"</i>"
-        )
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Set Message & Time", callback_data="adm_rec_set"),
-            types.InlineKeyboardButton("Toggle ON/OFF", callback_data="adm_rec_toggle"),
-            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
-        )
-        bot.edit_message_text(rec_panel, call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_rec_set":
-        admin_state[user_id] = "rec_step1_text"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("Cancel", callback_data="adm_recurring_menu"))
-        bot.edit_message_text("Step 1: Send the message text you want to auto-post in groups:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "adm_rec_toggle":
-        curr = db.setdefault("recurring_msg", {}).get("enabled", False)
-        db["recurring_msg"]["enabled"] = not curr
-        save_db(db)
-        bot.answer_callback_query(call.id, f"Auto message is now {'Enabled' if not curr else 'Disabled'}.")
-        
-        rec = db.get("recurring_msg", {})
-        status = "Enabled" if rec.get("enabled") else "Disabled"
-        interval = rec.get("interval_min", 0)
-        curr_text = rec.get("text") or "None"
-        rec_panel = (
-            "<b>Auto Recurring Message Manager:</b>\n\n"
-            f"• Status: <code>{status}</code>\n"
-            f"• Interval: <code>{interval} mins</code>\n"
-            f"• Current Text:\n<i>\"{curr_text}\"</i>"
-        )
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Set Message & Time", callback_data="adm_rec_set"),
-            types.InlineKeyboardButton("Toggle ON/OFF", callback_data="adm_rec_toggle"),
-            types.InlineKeyboardButton("Back to Dashboard", callback_data="adm_back")
-        )
-        bot.edit_message_text(rec_panel, call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     # Banned Words Submenu
@@ -1865,3 +1892,4 @@ def start_safe_polling():
 
 if __name__ == "__main__":
     start_safe_polling()
+
