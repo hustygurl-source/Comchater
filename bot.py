@@ -93,48 +93,40 @@ user_message_history = {}
 # ----------------- NETWORK EXECUTION ROUTE -----------------
 http_session = requests.Session()
 
-def execute_network_request(url, headers, cookies=None, timeout=7):
+def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirects=False):
     if PROXIES:
         try:
-            r = http_session.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=False)
+            r = http_session.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=allow_redirects)
             if r.status_code not in [429, 403, 502, 503]:
                 return r
         except Exception:
             pass  # Fallback to direct request
-    return http_session.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=False)
+    return http_session.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
 
-# ----------------- 100% ACCURATE PROFILE CHECK ENGINE -----------------
+# ----------------- PROACTIVE SESSION HEALTH TESTER -----------------
+def get_clean_session_cookie(raw_str):
+    if not raw_str:
+        return None, ""
+    sessions = [s.strip() for s in raw_str.split(",") if s.strip()]
+    if not sessions:
+        return None, ""
+    clean = urllib.parse.unquote(sessions[0])
+    ds_user_id = clean.split(":")[0] if ":" in clean else ""
+    return clean, ds_user_id
+
+CURRENT_SESSION, CURRENT_DS_USER_ID = get_clean_session_cookie(RAW_SESSIONS)
+
+# ----------------- BULLETPROOF PROFILE CHECK ENGINE -----------------
 def check_single_account(username):
     clean_username = username.strip().lower().replace("@", "")
     if not clean_username:
         return {"status": "UNKNOWN", "followers": "N/A", "following": "N/A"}
 
-    # Route 1: Instagram Mobile Internal API
-    try:
-        app_url = f"https://i.instagram.com/api/v1/users/{clean_username}/usernameinfo/"
-        app_headers = {
-            "User-Agent": "Instagram 315.0.0.38.109 Android (33/13; 420dpi; 1080x2400; Xiaomi; 2201117TI; spes; qcom; en_US; 564998765)",
-            "X-IG-App-ID": "936619743392459",
-            "Accept-Language": "en-US",
-            "Accept": "*/*"
-        }
-        r = execute_network_request(app_url, headers=app_headers, timeout=6)
+    cookies = {}
+    if CURRENT_SESSION:
+        cookies = {"sessionid": CURRENT_SESSION, "ds_user_id": CURRENT_DS_USER_ID}
 
-        if r.status_code == 200:
-            data = r.json()
-            user = data.get("user")
-            if user and (str(user.get("username", "")).lower() == clean_username or user.get("pk")):
-                return {
-                    "status": "ACTIVE",
-                    "followers": user.get("follower_count", "N/A"),
-                    "following": user.get("following_count", "N/A")
-                }
-        elif r.status_code == 404:
-            return {"status": "BANNED", "followers": 0, "following": 0}
-    except Exception:
-        pass
-
-    # Route 2: Web Profile Info API
+    # Method 1: Web Profile Info API
     try:
         api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={clean_username}"
         web_headers = {
@@ -145,41 +137,65 @@ def check_single_account(username):
             "Accept": "*/*",
             "Referer": f"https://www.instagram.com/{clean_username}/"
         }
-        r2 = execute_network_request(api_url, headers=web_headers, timeout=6)
+        r = execute_network_request(api_url, headers=web_headers, cookies=cookies, timeout=6, allow_redirects=False)
 
-        if r2.status_code == 200:
-            data2 = r2.json()
-            u = data2.get("data", {}).get("user")
-            if u and u.get("id"):
+        if r.status_code == 200:
+            data = r.json()
+            u = data.get("data", {}).get("user")
+            if u and (u.get("id") or str(u.get("username", "")).lower() == clean_username):
                 return {
                     "status": "ACTIVE",
                     "followers": u.get("edge_followed_by", {}).get("count", 0),
                     "following": u.get("edge_follow", {}).get("count", 0)
                 }
             return {"status": "BANNED", "followers": 0, "following": 0}
+        elif r.status_code == 404:
+            return {"status": "BANNED", "followers": 0, "following": 0}
+    except Exception:
+        pass
+
+    # Method 2: Android App User-Info Internal API
+    try:
+        app_url = f"https://i.instagram.com/api/v1/users/{clean_username}/usernameinfo/"
+        app_headers = {
+            "User-Agent": "Instagram 315.0.0.38.109 Android (33/13; 420dpi; 1080x2400; Xiaomi; 2201117TI; spes; qcom; en_US; 564998765)",
+            "X-IG-App-ID": "936619743392459",
+            "Accept-Language": "en-US",
+            "Accept": "*/*"
+        }
+        r2 = execute_network_request(app_url, headers=app_headers, cookies=cookies, timeout=6, allow_redirects=False)
+
+        if r2.status_code == 200:
+            data2 = r2.json()
+            user2 = data2.get("user")
+            if user2 and (str(user2.get("username", "")).lower() == clean_username or user2.get("pk")):
+                return {
+                    "status": "ACTIVE",
+                    "followers": user2.get("follower_count", "N/A"),
+                    "following": user2.get("following_count", "N/A")
+                }
         elif r2.status_code == 404:
             return {"status": "BANNED", "followers": 0, "following": 0}
     except Exception:
         pass
 
-    # Route 3: Public Shared Direct HTML Verification (Strict Metadata Regex)
+    # Method 3: Direct Profile Payload Parsing
     try:
         url_web = f"https://www.instagram.com/{clean_username}/"
         headers_web = {
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
-        r_web = execute_network_request(url_web, headers=headers_web, timeout=6)
+        r3 = execute_network_request(url_web, headers=headers_web, cookies=cookies, timeout=6, allow_redirects=True)
 
-        if r_web.status_code in [404, 410]:
+        if r3.status_code in [404, 410]:
             return {"status": "BANNED", "followers": 0, "following": 0}
 
-        if r_web.status_code == 200:
-            html = r_web.text
+        if r3.status_code == 200:
+            html = r3.text
             if "Sorry, this page isn't available" in html or "User not found" in html or "Page Not Found" in html:
                 return {"status": "BANNED", "followers": 0, "following": 0}
 
-            # Check if actual user profile is loaded
             if (f'content="https://www.instagram.com/{clean_username}/"' in html or f'@{clean_username}' in html) and 'og:type" content="profile"' in html:
                 f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
                 followers = f_match.group(1) if f_match else "N/A"
@@ -1241,60 +1257,4 @@ def handle_status(message):
         for u, d in user_bans.items():
             t = format_time_taken(time.time() - d["start_time"])
             ig_link = get_ig_link(u)
-            lines.append(f"• <b>{ig_link}</b> (Elapsed: <code>{t}</code>)")
-
-    bot.reply_to(message, "\n".join(lines))
-
-@bot.message_handler(func=lambda msg: True, content_types=['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation'])
-def handle_unrecognized_input(message):
-    user = message.from_user
-    register_user(user, message.chat.id)
-    track_and_clean_spam(message.chat.id, user.id, message.message_id)
-
-    if message.chat.type != "private":
-        return
-
-    missing = get_missing_channels(user.id)
-    if missing and not (is_admin_or_owner(user.id) or is_premium_user(user.id)):
-        mention = get_user_mention(user.id, user.first_name)
-        text = (
-            "⚠️ <b>Access Restricted</b>\n\n"
-            f"Hello {mention}, you must join all our required official channels below to access this bot:\n\n"
-            "<i>Click each channel to join, then tap Verify:</i>"
-        )
-        send_custom_media(chat.id, "force_join", text, reply_to=message.message_id, reply_markup=build_force_join_markup())
-        return
-
-    mention = get_user_mention(user.id, user.first_name)
-    sub_text = (
-        "<b>Instagram Monitor Bot 24x7</b>\n"
-        "<b>Want Subscription?</b>\n\n"
-        f"Hey {mention},\n"
-        f"Send your ID (<code>{user.id}</code>) token to owner to claim your Paid subscription."
-    )
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("Contact Owner", url="https://t.me/talkwithhimbot"),
-        types.InlineKeyboardButton("Join Main Channel", url="https://t.me/+ObinPrPz_ktkODJl")
-    )
-
-    sent = send_custom_media(message.chat.id, "subscription", sub_text, reply_to=message.message_id, reply_markup=markup)
-    if sent:
-        auto_delete_after_delay(message.chat.id, sent.message_id, delay_seconds=300)
-
-def run_bot_polling():
-    while True:
-        try:
-            print("[BOT] Clearing previous webhooks and starting Polling safely...", flush=True)
-            bot.remove_webhook()
-            time.sleep(3)
-            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
-        except Exception as e:
-            print(f"[BOT ERROR] Polling interrupted: {e}. Reconnecting in 5s...", flush=True)
-            time.sleep(5)
-
-if __name__ == "__main__":
-    _verify_integrity()
-    print("[INIT] Dual Tracker Bot is active with Native UserInfo Engine...", flush=True)
-    run_bot_polling()
+            lines.append(f"• <b>{ig_link}</b> (Elapsed:
