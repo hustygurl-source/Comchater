@@ -65,7 +65,14 @@ threading.Thread(target=run_server, daemon=True).start()
 # ----------------- CONFIGURATION & CONSTANTS -----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-RAW_SESSIONS = os.environ.get("INSTAGRAM_SESSION_IDS") or os.environ.get("INSTAGRAM_SESSION_ID", "")
+
+RAW_SESSIONS = (
+    os.environ.get("INSTAGRAM_SESSION_IDS") or 
+    os.environ.get("INSTAGRAM_SESSION_ID") or 
+    os.environ.get("SESSION_ID") or 
+    os.environ.get("SESSION_IDS") or 
+    os.environ.get("IG_SESSION", "")
+)
 
 raw_proxy = os.environ.get("PROXY_URL", "").strip()
 PROXIES = {
@@ -84,17 +91,17 @@ admin_state = {}
 user_message_history = {}
 
 # ----------------- NETWORK EXECUTION ROUTE -----------------
-def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirects=True):
+def execute_network_request(url, headers, cookies=None, timeout=8, allow_redirects=False):
     if PROXIES:
         try:
             r = requests.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=allow_redirects)
-            if r.status_code != 429:
+            if r.status_code not in [429, 403, 502, 503]:
                 return r
         except Exception:
-            pass  # Fallback to direct connection
+            pass  # Direct fallback on proxy failure
     return requests.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
 
-# ----------------- ULTRA-ACCURATE SCRAPER ENGINE -----------------
+# ----------------- BULLETPROOF SCRAPER ENGINE -----------------
 def single_request_check(username, session_id=None):
     clean_username = username.strip().lower().replace("@", "")
     if not clean_username:
@@ -103,7 +110,7 @@ def single_request_check(username, session_id=None):
     clean_session = urllib.parse.unquote(session_id.strip()) if session_id else None
     ds_user_id = clean_session.split(":")[0] if clean_session and ":" in clean_session else ""
 
-    # Route 1: Official Instagram Web Profile Info API (Direct Header Signature)
+    # Route 1: Official Instagram Web Profile Info API
     api_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "X-IG-App-ID": "936619743392459",
@@ -116,7 +123,7 @@ def single_request_check(username, session_id=None):
 
     try:
         api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={clean_username}"
-        r = execute_network_request(api_url, headers=api_headers, cookies=cookies, timeout=6, allow_redirects=False)
+        r = execute_network_request(api_url, headers=api_headers, cookies=cookies, timeout=7, allow_redirects=False)
 
         if r.status_code == 200:
             data = r.json()
@@ -135,50 +142,61 @@ def single_request_check(username, session_id=None):
     except Exception:
         pass
 
-    # Route 2: Public Mobile Shared Data Profile Scraper
+    # Route 2: Mobile Shared Data Profile Scraper (Strict Header Inspection)
     try:
         prof_url = f"https://www.instagram.com/{clean_username}/"
         prof_headers = {
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9"
         }
-        r_prof = execute_network_request(prof_url, headers=prof_headers, cookies={}, timeout=6, allow_redirects=True)
+        r_prof = execute_network_request(prof_url, headers=prof_headers, cookies={}, timeout=7, allow_redirects=False)
 
         if r_prof.status_code in [404, 410]:
             return {"status": "BANNED", "followers": 0, "following": 0}
 
-        html = r_prof.text
-        if "Page Not Found" in html or "isn't available" in html or "link you followed may be broken" in html:
-            return {"status": "BANNED", "followers": 0, "following": 0}
+        if r_prof.status_code == 200:
+            html = r_prof.text
+            if "Page Not Found" in html or "isn't available" in html or "link you followed may be broken" in html:
+                return {"status": "BANNED", "followers": 0, "following": 0}
 
-        if f'content="https://www.instagram.com/{clean_username}/"' in html or \
-           f'"username":"{clean_username}"' in html or \
-           'og:type" content="profile"' in html or \
-           f'@{clean_username}' in html or \
-           f'title="{clean_username}"' in html:
+            if f'content="https://www.instagram.com/{clean_username}/"' in html or \
+               f'"username":"{clean_username}"' in html or \
+               'og:type" content="profile"' in html or \
+               f'@{clean_username}' in html:
 
-            f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
-            followers = f_match.group(1) if f_match else "N/A"
-            return {"status": "ACTIVE", "followers": followers, "following": "N/A"}
+                f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
+                followers = f_match.group(1) if f_match else "N/A"
+                return {"status": "ACTIVE", "followers": followers, "following": "N/A"}
 
+        # If 302 Redirect to login occurs, do NOT mark as Banned!
+        if r_prof.status_code in [301, 302]:
+            loc = r_prof.headers.get("Location", "")
+            if f"/{clean_username}/" in loc:
+                return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
     except Exception:
         pass
 
-    # Route 3: Public Embed Validation
+    # Route 3: Android App Internal Lookup
     try:
-        embed_url = f"https://www.instagram.com/{clean_username}/embed/"
-        embed_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        app_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={clean_username}"
+        app_headers = {
+            "User-Agent": "Instagram 278.0.0.19.115 Android (30/11; 480dpi; 1080x2176; Xiaomi; Redmi Note 10; citrus; qcom; en_US; 461427670)",
+            "X-IG-App-ID": "936619743392459",
+            "Accept-Language": "en-US",
             "Accept": "*/*"
         }
-        r_emb = execute_network_request(embed_url, headers=embed_headers, cookies={}, timeout=6, allow_redirects=False)
-        if r_emb.status_code in [404, 410]:
+        r_app = execute_network_request(app_url, headers=app_headers, cookies={}, timeout=7, allow_redirects=False)
+        if r_app.status_code == 200:
+            u = r_app.json().get("data", {}).get("user")
+            if u:
+                return {
+                    "status": "ACTIVE",
+                    "followers": u.get("edge_followed_by", {}).get("count", 0),
+                    "following": u.get("edge_follow", {}).get("count", 0)
+                }
+        elif r_app.status_code == 404:
             return {"status": "BANNED", "followers": 0, "following": 0}
-        if r_emb.status_code == 200:
-            if "Watch on Instagram" in r_emb.text or "View profile" in r_emb.text or f"/{clean_username}/" in r_emb.text:
-                return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
-            if "Page Not Found" in r_emb.text or "unavailable" in r_emb.text:
-                return {"status": "BANNED", "followers": 0, "following": 0}
     except Exception:
         pass
 
@@ -241,7 +259,13 @@ class SessionPool:
                 time.sleep(0.2)
 
     def reload_from_env(self):
-        raw = os.environ.get("INSTAGRAM_SESSION_IDS") or os.environ.get("INSTAGRAM_SESSION_ID", "")
+        raw = (
+            os.environ.get("INSTAGRAM_SESSION_IDS") or 
+            os.environ.get("INSTAGRAM_SESSION_ID") or 
+            os.environ.get("SESSION_ID") or 
+            os.environ.get("SESSION_IDS") or 
+            os.environ.get("IG_SESSION", "")
+        )
         self.all_sessions = [s.strip() for s in raw.split(",") if s.strip()]
         self.run_full_health_check()
 
@@ -1280,6 +1304,8 @@ def handle_unban_request(message):
         return
 
     status_data = check_single_account(username)
+    
+    # Strict validation: ONLY add if it is genuinely BANNED
     if status_data["status"] == "ACTIVE":
         caption = (
             f"ℹ️ <b>{ig_link}</b> is already active.\n\n"
@@ -1288,7 +1314,7 @@ def handle_unban_request(message):
         send_custom_media(message.chat.id, "deny", caption, reply_to=message.message_id)
         return
     elif status_data["status"] == "UNKNOWN":
-        bot.reply_to(message, f"⚠️ <b>Could not verify {ig_link} right now.</b> Please try again in 10-20 seconds.")
+        bot.reply_to(message, f"⚠️ <b>Could not verify {ig_link} right now.</b> Instagram rate limit active. Try again in 20s.")
         return
 
     req_time = get_current_time_str()
@@ -1337,6 +1363,8 @@ def handle_ban_request(message):
         return
 
     status_data = check_single_account(username)
+
+    # Strict validation: ONLY add if it is genuinely ACTIVE
     if status_data["status"] == "BANNED":
         caption = (
             f"ℹ️ <b>{ig_link}</b> is already banned or unavailable.\n\n"
@@ -1345,7 +1373,7 @@ def handle_ban_request(message):
         send_custom_media(message.chat.id, "deny", caption, reply_to=message.message_id)
         return
     elif status_data["status"] == "UNKNOWN":
-        bot.reply_to(message, f"⚠️ <b>Could not verify {ig_link} right now.</b> Please try again in 10-20 seconds.")
+        bot.reply_to(message, f"⚠️ <b>Could not verify {ig_link} right now.</b> Instagram rate limit active. Try again in 20s.")
         return
 
     req_time = get_current_time_str()
@@ -1460,5 +1488,5 @@ def run_bot_polling():
 
 if __name__ == "__main__":
     _verify_integrity()
-    print("[INIT] Dual Tracker Bot is active with Resilient Multi-Route Engine...", flush=True)
+    print(f"[INIT] Dual Tracker Bot is active. Loaded Sessions: {len(session_pool.active_sessions)}", flush=True)
     run_bot_polling()
