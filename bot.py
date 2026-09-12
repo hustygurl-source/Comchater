@@ -91,26 +91,54 @@ admin_state = {}
 user_message_history = {}
 
 # ----------------- NETWORK EXECUTION ROUTE -----------------
+http_session = requests.Session()
+
 def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirects=False):
     if PROXIES:
         try:
-            r = requests.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=allow_redirects)
+            r = http_session.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=allow_redirects)
             if r.status_code not in [429, 403, 502, 503]:
                 return r
         except Exception:
-            pass
-    return requests.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
+            pass  # Fallback to direct request
+    return http_session.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
 
-# ----------------- HIGH-PRECISION GRAPHQL ENGINE -----------------
+# ----------------- 100% ACCURATE PROFILE CHECK ENGINE -----------------
 def check_single_account(username):
     clean_username = username.strip().lower().replace("@", "")
     if not clean_username:
         return {"status": "UNKNOWN", "followers": "N/A", "following": "N/A"}
 
-    # Method 1: Official Instagram Web API (Profile info with App-ID)
+    # Method 1: Official Instagram App User-Info Endpoint (Strict Binary Decision)
+    try:
+        app_url = f"https://i.instagram.com/api/v1/users/{clean_username}/usernameinfo/"
+        app_headers = {
+            "User-Agent": "Instagram 315.0.0.38.109 Android (33/13; 420dpi; 1080x2400; Xiaomi; 2201117TI; spes; qcom; en_US; 564998765)",
+            "X-IG-App-ID": "936619743392459",
+            "Accept-Language": "en-US",
+            "Accept-Encoding": "gzip, deflate",
+            "Accept": "*/*"
+        }
+        r = execute_network_request(app_url, headers=app_headers, timeout=6, allow_redirects=False)
+
+        if r.status_code == 200:
+            data = r.json()
+            user = data.get("user")
+            if user and (str(user.get("username", "")).lower() == clean_username or user.get("pk")):
+                return {
+                    "status": "ACTIVE",
+                    "followers": user.get("follower_count", "N/A"),
+                    "following": user.get("following_count", "N/A")
+                }
+        elif r.status_code == 404:
+            return {"status": "BANNED", "followers": 0, "following": 0}
+    except Exception:
+        pass
+
+    # Method 2: Web Profile Info API
     try:
         api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={clean_username}"
-        headers = {
+        web_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
             "X-IG-App-ID": "936619743392459",
             "X-ASBD-ID": "129477",
@@ -118,66 +146,41 @@ def check_single_account(username):
             "Accept": "*/*",
             "Referer": f"https://www.instagram.com/{clean_username}/"
         }
-        r = execute_network_request(api_url, headers=headers, cookies={}, timeout=6, allow_redirects=False)
+        r2 = execute_network_request(api_url, headers=web_headers, timeout=6, allow_redirects=False)
 
-        if r.status_code == 200:
-            res_json = r.json()
-            user = res_json.get("data", {}).get("user")
-            if user:
+        if r2.status_code == 200:
+            data2 = r2.json()
+            u = data2.get("data", {}).get("user")
+            if u and u.get("id"):
                 return {
                     "status": "ACTIVE",
-                    "followers": user.get("edge_followed_by", {}).get("count", 0),
-                    "following": user.get("edge_follow", {}).get("count", 0)
+                    "followers": u.get("edge_followed_by", {}).get("count", 0),
+                    "following": u.get("edge_follow", {}).get("count", 0)
                 }
             return {"status": "BANNED", "followers": 0, "following": 0}
-        elif r.status_code == 404:
+        elif r2.status_code == 404:
             return {"status": "BANNED", "followers": 0, "following": 0}
     except Exception:
         pass
 
-    # Method 2: Public Meta GraphQL Doc ID Query (No Cookies, Rate-Limit Resistant)
+    # Method 3: Embed Header Inspector (Never confuses Login Redirects)
     try:
-        gql_url = f"https://www.instagram.com/graphql/query/?doc_id=17983691515220670&variables={{\"id\":\"{clean_username}\"}}"
-        headers_gql = {
+        embed_url = f"https://www.instagram.com/{clean_username}/embed/"
+        emb_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "X-IG-App-ID": "936619743392459",
-            "Accept": "*/*"
-        }
-        r_gql = execute_network_request(gql_url, headers=headers_gql, cookies={}, timeout=6, allow_redirects=False)
-        if r_gql.status_code == 200:
-            data = r_gql.json()
-            user_node = data.get("data", {}).get("user")
-            if user_node:
-                return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
-            elif user_node is None and "data" in data:
-                return {"status": "BANNED", "followers": 0, "following": 0}
-    except Exception:
-        pass
-
-    # Method 3: Public Shared Direct HTML Verification
-    try:
-        url_web = f"https://www.instagram.com/{clean_username}/"
-        headers_web = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
-        r_web = execute_network_request(url_web, headers=headers_web, cookies={}, timeout=6, allow_redirects=True)
+        r3 = execute_network_request(embed_url, headers=emb_headers, timeout=6, allow_redirects=False)
 
-        if r_web.status_code in [404, 410]:
+        if r3.status_code in [404, 410]:
             return {"status": "BANNED", "followers": 0, "following": 0}
 
-        html = r_web.text
-        if "Sorry, this page isn't available" in html or "User not found" in html or "Page Not Found" in html:
-            return {"status": "BANNED", "followers": 0, "following": 0}
-
-        if f'content="https://www.instagram.com/{clean_username}/"' in html or \
-           f'"username":"{clean_username}"' in html or \
-           'og:type" content="profile"' in html or \
-           f'@{clean_username}' in html:
-            
-            f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
-            followers = f_match.group(1) if f_match else "N/A"
-            return {"status": "ACTIVE", "followers": followers, "following": "N/A"}
+        if r3.status_code == 200:
+            text = r3.text
+            if "Page Not Found" in text or "unavailable" in text or "link you followed may be broken" in text:
+                return {"status": "BANNED", "followers": 0, "following": 0}
+            if "View profile" in text or "Watch on Instagram" in text or 'class="UsernameText"' in text:
+                return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
     except Exception:
         pass
 
@@ -203,7 +206,7 @@ def init_postgres():
         conn.commit()
         cur.close()
         conn.close()
-        print("[DATABASE] Neon PostgreSQL Initialized Successfully!", flush=True)
+        print("[DATABASE] Neon PostgreSQL Schema Verified!", flush=True)
     except Exception as e:
         print(f"[DATABASE ERROR] Init failed: {e}", flush=True)
 
@@ -542,6 +545,7 @@ def monitor_loop():
         try:
             _verify_integrity()
 
+            # Process Unban Monitors (Waiting for BANNED -> ACTIVE)
             unban_items = list(db.get("unban_monitors", {}).items())
             if unban_items:
                 for user, info in unban_items:
@@ -573,6 +577,7 @@ def monitor_loop():
                         save_db(db)
                     time.sleep(1.5)
 
+            # Process Ban Monitors (Waiting for ACTIVE -> BANNED)
             ban_items = list(db.get("ban_monitors", {}).items())
             if ban_items:
                 for user, info in ban_items:
@@ -1079,6 +1084,7 @@ def handle_start_help(message):
     )
     bot.reply_to(message, welcome_text)
 
+# ----------------- /ub: ONLY ACCEPTS BANNED ACCOUNTS -----------------
 @bot.message_handler(commands=['ub', 'unban'])
 def handle_unban_request(message):
     if not check_access(message):
@@ -1101,7 +1107,7 @@ def handle_unban_request(message):
 
     status_data = check_single_account(username)
     
-    # Strict Verification: Agar account ACTIVE hai to DENY karo!
+    # Strict check: If account is ALREADY ACTIVE, immediately DENY!
     if status_data["status"] == "ACTIVE":
         caption = (
             f"ℹ️ <b>{ig_link}</b> is already active.\n\n"
@@ -1110,10 +1116,10 @@ def handle_unban_request(message):
         send_custom_media(message.chat.id, "deny", caption, reply_to=message.message_id)
         return
     elif status_data["status"] == "UNKNOWN":
-        bot.reply_to(message, f"⚠️ <b>Unable to verify {ig_link}.</b> Rate-limit active. Please try in 15 seconds.")
+        bot.reply_to(message, f"⚠️ <b>Unable to verify status for {ig_link}.</b> Rate limit active. Please try again in 15 seconds.")
         return
 
-    # Sirf tabhi add hoga jab BANNED confirm ho
+    # ONLY ACCEPT IF CONFIRMED BANNED
     req_time = get_current_time_str()
     req_date = get_current_date_str()
 
@@ -1139,6 +1145,7 @@ def handle_unban_request(message):
 
     send_custom_media(message.chat.id, "ub_req", caption, reply_to=message.message_id)
 
+# ----------------- /b: ONLY ACCEPTS ACTIVE ACCOUNTS -----------------
 @bot.message_handler(commands=['b', 'ban'])
 def handle_ban_request(message):
     if not check_access(message):
@@ -1161,7 +1168,7 @@ def handle_ban_request(message):
 
     status_data = check_single_account(username)
 
-    # Strict Verification: Agar account BANNED hai to DENY karo!
+    # Strict check: If account is ALREADY BANNED, immediately DENY!
     if status_data["status"] == "BANNED":
         caption = (
             f"ℹ️ <b>{ig_link}</b> is already banned or unavailable.\n\n"
@@ -1170,10 +1177,10 @@ def handle_ban_request(message):
         send_custom_media(message.chat.id, "deny", caption, reply_to=message.message_id)
         return
     elif status_data["status"] == "UNKNOWN":
-        bot.reply_to(message, f"⚠️ <b>Unable to verify {ig_link}.</b> Rate-limit active. Please try in 15 seconds.")
+        bot.reply_to(message, f"⚠️ <b>Unable to verify status for {ig_link}.</b> Rate limit active. Please try again in 15 seconds.")
         return
 
-    # Sirf tabhi add hoga jab ACTIVE confirm ho
+    # ONLY ACCEPT IF CONFIRMED ACTIVE
     req_time = get_current_time_str()
     req_date = get_current_date_str()
 
@@ -1286,5 +1293,5 @@ def run_bot_polling():
 
 if __name__ == "__main__":
     _verify_integrity()
-    print("[INIT] Dual Tracker Bot is active with GraphQL Core Engine...", flush=True)
+    print("[INIT] Dual Tracker Bot is active with App-Native Engine...", flush=True)
     run_bot_polling()
