@@ -12,7 +12,15 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 from datetime import datetime, timezone, timedelta
-import psycopg2
+
+# Dynamic PostgreSQL Driver Fallback (psycopg2 or psycopg)
+try:
+    import psycopg2
+except ImportError:
+    try:
+        import psycopg as psycopg2
+    except ImportError:
+        psycopg2 = None
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -261,6 +269,8 @@ def check_single_account(username):
 # ----------------- NEON POSTGRESQL ENGINE -----------------
 def get_db_connection():
     clean_url = DATABASE_URL.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
+    if not psycopg2:
+        raise ImportError("No PostgreSQL driver found (neither psycopg2 nor psycopg).")
     return psycopg2.connect(clean_url, sslmode="require", connect_timeout=10)
 
 def init_postgres():
