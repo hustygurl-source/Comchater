@@ -91,220 +91,103 @@ admin_state = {}
 user_message_history = {}
 
 # ----------------- NETWORK EXECUTION ROUTE -----------------
-def execute_network_request(url, headers, cookies=None, timeout=8, allow_redirects=False):
+def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirects=False):
     if PROXIES:
         try:
             r = requests.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=allow_redirects)
             if r.status_code not in [429, 403, 502, 503]:
                 return r
         except Exception:
-            pass  # Direct fallback on proxy failure
+            pass
     return requests.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
 
-# ----------------- BULLETPROOF SCRAPER ENGINE -----------------
-def single_request_check(username, session_id=None):
+# ----------------- HIGH-PRECISION GRAPHQL ENGINE -----------------
+def check_single_account(username):
     clean_username = username.strip().lower().replace("@", "")
     if not clean_username:
         return {"status": "UNKNOWN", "followers": "N/A", "following": "N/A"}
 
-    clean_session = urllib.parse.unquote(session_id.strip()) if session_id else None
-    ds_user_id = clean_session.split(":")[0] if clean_session and ":" in clean_session else ""
-
-    # Route 1: Official Instagram Web Profile Info API
-    api_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "X-IG-App-ID": "936619743392459",
-        "X-ASBD-ID": "129477",
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept": "*/*",
-        "Referer": f"https://www.instagram.com/{clean_username}/"
-    }
-    cookies = {"sessionid": clean_session, "ds_user_id": ds_user_id} if clean_session else {}
-
+    # Method 1: Official Instagram Web API (Profile info with App-ID)
     try:
         api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={clean_username}"
-        r = execute_network_request(api_url, headers=api_headers, cookies=cookies, timeout=7, allow_redirects=False)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "X-IG-App-ID": "936619743392459",
+            "X-ASBD-ID": "129477",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "*/*",
+            "Referer": f"https://www.instagram.com/{clean_username}/"
+        }
+        r = execute_network_request(api_url, headers=headers, cookies={}, timeout=6, allow_redirects=False)
 
         if r.status_code == 200:
-            data = r.json()
-            user_data = data.get("data", {}).get("user")
-            if user_data:
+            res_json = r.json()
+            user = res_json.get("data", {}).get("user")
+            if user:
                 return {
                     "status": "ACTIVE",
-                    "followers": user_data.get("edge_followed_by", {}).get("count", 0),
-                    "following": user_data.get("edge_follow", {}).get("count", 0)
+                    "followers": user.get("edge_followed_by", {}).get("count", 0),
+                    "following": user.get("edge_follow", {}).get("count", 0)
                 }
             return {"status": "BANNED", "followers": 0, "following": 0}
         elif r.status_code == 404:
             return {"status": "BANNED", "followers": 0, "following": 0}
-        elif r.status_code in [401, 302] and session_id:
-            session_pool.flag_session(session_id, f"HTTP {r.status_code} Expired")
     except Exception:
         pass
 
-    # Route 2: Mobile Shared Data Profile Scraper (Strict Header Inspection)
+    # Method 2: Public Meta GraphQL Doc ID Query (No Cookies, Rate-Limit Resistant)
     try:
-        prof_url = f"https://www.instagram.com/{clean_username}/"
-        prof_headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9"
-        }
-        r_prof = execute_network_request(prof_url, headers=prof_headers, cookies={}, timeout=7, allow_redirects=False)
-
-        if r_prof.status_code in [404, 410]:
-            return {"status": "BANNED", "followers": 0, "following": 0}
-
-        if r_prof.status_code == 200:
-            html = r_prof.text
-            if "Page Not Found" in html or "isn't available" in html or "link you followed may be broken" in html:
-                return {"status": "BANNED", "followers": 0, "following": 0}
-
-            if f'content="https://www.instagram.com/{clean_username}/"' in html or \
-               f'"username":"{clean_username}"' in html or \
-               'og:type" content="profile"' in html or \
-               f'@{clean_username}' in html:
-
-                f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
-                followers = f_match.group(1) if f_match else "N/A"
-                return {"status": "ACTIVE", "followers": followers, "following": "N/A"}
-
-        # If 302 Redirect to login occurs, do NOT mark as Banned!
-        if r_prof.status_code in [301, 302]:
-            loc = r_prof.headers.get("Location", "")
-            if f"/{clean_username}/" in loc:
-                return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
-    except Exception:
-        pass
-
-    # Route 3: Android App Internal Lookup
-    try:
-        app_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={clean_username}"
-        app_headers = {
-            "User-Agent": "Instagram 278.0.0.19.115 Android (30/11; 480dpi; 1080x2176; Xiaomi; Redmi Note 10; citrus; qcom; en_US; 461427670)",
+        gql_url = f"https://www.instagram.com/graphql/query/?doc_id=17983691515220670&variables={{\"id\":\"{clean_username}\"}}"
+        headers_gql = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-IG-App-ID": "936619743392459",
-            "Accept-Language": "en-US",
             "Accept": "*/*"
         }
-        r_app = execute_network_request(app_url, headers=app_headers, cookies={}, timeout=7, allow_redirects=False)
-        if r_app.status_code == 200:
-            u = r_app.json().get("data", {}).get("user")
-            if u:
-                return {
-                    "status": "ACTIVE",
-                    "followers": u.get("edge_followed_by", {}).get("count", 0),
-                    "following": u.get("edge_follow", {}).get("count", 0)
-                }
-        elif r_app.status_code == 404:
+        r_gql = execute_network_request(gql_url, headers=headers_gql, cookies={}, timeout=6, allow_redirects=False)
+        if r_gql.status_code == 200:
+            data = r_gql.json()
+            user_node = data.get("data", {}).get("user")
+            if user_node:
+                return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
+            elif user_node is None and "data" in data:
+                return {"status": "BANNED", "followers": 0, "following": 0}
+    except Exception:
+        pass
+
+    # Method 3: Public Shared Direct HTML Verification
+    try:
+        url_web = f"https://www.instagram.com/{clean_username}/"
+        headers_web = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        r_web = execute_network_request(url_web, headers=headers_web, cookies={}, timeout=6, allow_redirects=True)
+
+        if r_web.status_code in [404, 410]:
             return {"status": "BANNED", "followers": 0, "following": 0}
+
+        html = r_web.text
+        if "Sorry, this page isn't available" in html or "User not found" in html or "Page Not Found" in html:
+            return {"status": "BANNED", "followers": 0, "following": 0}
+
+        if f'content="https://www.instagram.com/{clean_username}/"' in html or \
+           f'"username":"{clean_username}"' in html or \
+           'og:type" content="profile"' in html or \
+           f'@{clean_username}' in html:
+            
+            f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
+            followers = f_match.group(1) if f_match else "N/A"
+            return {"status": "ACTIVE", "followers": followers, "following": "N/A"}
     except Exception:
         pass
 
     return {"status": "UNKNOWN", "followers": "N/A", "following": "N/A"}
 
-def test_session_health(session_id):
-    clean_session = urllib.parse.unquote(session_id.strip())
-    ds_user_id = clean_session.split(":")[0] if ":" in clean_session else ""
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "X-IG-App-ID": "936619743392459",
-        "X-ASBD-ID": "129477",
-        "Accept": "*/*",
-        "Referer": "https://www.instagram.com/"
-    }
-    cookies = {"sessionid": clean_session, "ds_user_id": ds_user_id}
-
-    try:
-        url = "https://www.instagram.com/api/v1/users/web_profile_info/?username=instagram"
-        r = execute_network_request(url, headers=headers, cookies=cookies, timeout=6, allow_redirects=False)
-
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("data", {}).get("user"):
-                return True, "Active & Verified"
-            return True, "Active (Operational)"
-        if r.status_code in [301, 302]:
-            return False, "Redirect / Challenge"
-        elif r.status_code == 401:
-            return False, "401 Unauthorized"
-        elif r.status_code == 403:
-            return False, "403 Forbidden"
-        
-        return True, "Active (Standby)"
-    except Exception:
-        return True, "Active (Direct Mode)"
-
-class SessionPool:
-    def __init__(self, raw_string):
-        self.all_sessions = [s.strip() for s in raw_string.split(",") if s.strip()]
-        self.active_sessions = set()
-        self.flagged_sessions = {}
-        self.lock = threading.Lock()
-        self.run_full_health_check()
-
-    def run_full_health_check(self):
-        with self.lock:
-            self.active_sessions.clear()
-            self.flagged_sessions.clear()
-            print(f"[SESSION POOL] Validating {len(self.all_sessions)} session(s)...", flush=True)
-            for s in self.all_sessions:
-                is_valid, reason = test_session_health(s)
-                if is_valid:
-                    self.active_sessions.add(s)
-                    print(f"[SESSION POOL] Session {s[:6]}... is VALID (🟢 Active)", flush=True)
-                else:
-                    self.flagged_sessions[s] = f"{reason} ({datetime.now().strftime('%I:%M %p')})"
-                    print(f"[SESSION POOL] Session {s[:6]}... is FLAGGED (🔴 {reason})", flush=True)
-                time.sleep(0.2)
-
-    def reload_from_env(self):
-        raw = (
-            os.environ.get("INSTAGRAM_SESSION_IDS") or 
-            os.environ.get("INSTAGRAM_SESSION_ID") or 
-            os.environ.get("SESSION_ID") or 
-            os.environ.get("SESSION_IDS") or 
-            os.environ.get("IG_SESSION", "")
-        )
-        self.all_sessions = [s.strip() for s in raw.split(",") if s.strip()]
-        self.run_full_health_check()
-
-    def get_random_sessions(self, count=1):
-        with self.lock:
-            actives = list(self.active_sessions)
-            if not actives:
-                return []
-            if len(actives) <= count:
-                return actives
-            return random.sample(actives, count)
-
-    def flag_session(self, session, reason="Expired / Flagged"):
-        with self.lock:
-            if session in self.active_sessions:
-                self.active_sessions.remove(session)
-                self.flagged_sessions[session] = f"{reason} ({datetime.now().strftime('%I:%M %p')})"
-                print(f"[SESSION POOL] Dynamically Flagged: {session[:8]}... Reason: {reason}", flush=True)
-
-session_pool = SessionPool(RAW_SESSIONS)
-
-def check_single_account(username):
-    username = username.strip().lower().replace("@", "")
-    if not username:
-        return {"status": "UNKNOWN", "followers": "N/A", "following": "N/A"}
-
-    sessions = session_pool.get_random_sessions(1)
-    if sessions:
-        res = single_request_check(username, sessions[0])
-        if res["status"] in ["ACTIVE", "BANNED"]:
-            return res
-
-    return single_request_check(username, None)
-
 # ----------------- NEON POSTGRESQL ENGINE -----------------
 def get_db_connection():
     clean_url = DATABASE_URL.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
     if not psycopg2:
-        raise ImportError("No PostgreSQL driver found.")
+        raise ImportError("No PostgreSQL driver installed.")
     return psycopg2.connect(clean_url, sslmode="require", connect_timeout=10)
 
 def init_postgres():
@@ -320,7 +203,7 @@ def init_postgres():
         conn.commit()
         cur.close()
         conn.close()
-        print("[DATABASE] Neon PostgreSQL Schema Verified & Initialized!", flush=True)
+        print("[DATABASE] Neon PostgreSQL Initialized Successfully!", flush=True)
     except Exception as e:
         print(f"[DATABASE ERROR] Init failed: {e}", flush=True)
 
@@ -740,7 +623,6 @@ def get_admin_panel_markup():
     markup.add(
         types.InlineKeyboardButton("📬 Mailing", callback_data="admin_mailing_select"),
         types.InlineKeyboardButton("📊 Statistics", callback_data="admin_stats"),
-        types.InlineKeyboardButton("🔑 Session Pool", callback_data="admin_sessions_menu"),
         types.InlineKeyboardButton(f"🛠 Maint. ({m_status})", callback_data="toggle_maintenance"),
         types.InlineKeyboardButton(f"👤 New User ({n_status})", callback_data="toggle_notify"),
         types.InlineKeyboardButton("🖼 Manage Media", callback_data="admin_media"),
@@ -796,34 +678,6 @@ def handle_admin(message):
     )
     bot.reply_to(message, admin_text, reply_markup=get_admin_panel_markup())
 
-@bot.message_handler(commands=['sessions'])
-def handle_sessions_command(message):
-    user_id = message.from_user.id
-    if not is_admin_or_owner(user_id):
-        return
-
-    total = len(session_pool.all_sessions)
-    active = len(session_pool.active_sessions)
-    flagged = len(session_pool.flagged_sessions)
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton(f"🟢 Active ({active})", callback_data="sess_view_active"),
-        types.InlineKeyboardButton(f"🔴 Flagged ({flagged})", callback_data="sess_view_flagged"),
-        types.InlineKeyboardButton("🔄 Re-test / Reset Pool", callback_data="sess_reset_pool"),
-        types.InlineKeyboardButton("🔙 Back to Dashboard", callback_data="admin_back")
-    )
-
-    bot.reply_to(
-        message,
-        "🔑 <b>Instagram Session Pool Monitor</b>\n\n"
-        f"• <b>Total Loaded:</b> <code>{total}</code>\n"
-        f"• <b>Active & Working:</b> <code>{active}</code>\n"
-        f"• <b>Flagged / Expired:</b> <code>{flagged}</code>\n\n"
-        "Select an option below to view detailed breakdown:",
-        reply_markup=markup
-    )
-
 @bot.message_handler(commands=['r', 'remove_monitor'])
 def handle_remove_monitor(message):
     if not check_access(message):
@@ -852,7 +706,7 @@ def handle_remove_monitor(message):
         bot.reply_to(message, f"ℹ️ Target <b>{ig_link}</b> was not found in the active monitoring list.")
 
 # ----------------- ADMIN CALLBACK HANDLERS -----------------
-@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_") or call.data.startswith("sess_") or call.data.startswith("toggle_") or call.data.startswith("set_") or call.data.startswith("see_") or call.data.startswith("del_") or call.data.startswith("btn_") or call.data.startswith("col_") or call.data.startswith("mail_") or call.data == "reset_all_media")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_") or call.data.startswith("toggle_") or call.data.startswith("set_") or call.data.startswith("see_") or call.data.startswith("del_") or call.data.startswith("btn_") or call.data.startswith("col_") or call.data.startswith("mail_") or call.data == "reset_all_media")
 def handle_admin_callbacks(call):
     user_id = call.from_user.id
     if not is_admin_or_owner(user_id):
@@ -866,63 +720,6 @@ def handle_admin_callbacks(call):
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
             pass
-        return
-
-    if data == "admin_sessions_menu":
-        total = len(session_pool.all_sessions)
-        active = len(session_pool.active_sessions)
-        flagged = len(session_pool.flagged_sessions)
-
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton(f"🟢 Active ({active})", callback_data="sess_view_active"),
-            types.InlineKeyboardButton(f"🔴 Flagged ({flagged})", callback_data="sess_view_flagged"),
-            types.InlineKeyboardButton("🔄 Re-test / Reset Pool", callback_data="sess_reset_pool"),
-            types.InlineKeyboardButton("🔙 Back to Dashboard", callback_data="admin_back")
-        )
-        bot.edit_message_text(
-            "🔑 <b>Instagram Session Pool Monitor</b>\n\n"
-            f"• <b>Total Loaded:</b> <code>{total}</code>\n"
-            f"• <b>Active & Working:</b> <code>{active}</code>\n"
-            f"• <b>Flagged / Expired:</b> <code>{flagged}</code>\n\n"
-            "Choose an option below:",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=markup
-        )
-        return
-
-    if data == "sess_view_active":
-        actives = list(session_pool.active_sessions)
-        if not actives:
-            text = "🟢 <b>Active Sessions:</b>\n\n<i>No valid sessions working currently.</i>"
-        else:
-            lines = [f"{i+1}. <code>{s[:6]}...{s[-4:]}</code> (🟢 Verified & Active)" for i, s in enumerate(actives)]
-            text = f"🟢 <b>Active Sessions Pool ({len(actives)}):</b>\n\n" + "\n".join(lines)
-
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Back to Sessions", callback_data="admin_sessions_menu"))
-        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "sess_view_flagged":
-        flagged = session_pool.flagged_sessions
-        if not flagged:
-            text = "🔴 <b>Flagged Sessions:</b>\n\n<i>All loaded sessions are healthy and verified!</i>"
-        else:
-            lines = [f"{i+1}. <code>{s[:6]}...{s[-4:]}</code>\n   ⚠️ <i>{reason}</i>" for i, (s, reason) in enumerate(flagged.items())]
-            text = f"🔴 <b>Flagged / Dead Sessions ({len(flagged)}):</b>\n\n" + "\n\n".join(lines)
-
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Back to Sessions", callback_data="admin_sessions_menu"))
-        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-        return
-
-    if data == "sess_reset_pool":
-        bot.answer_callback_query(call.id, "🔄 Validating sessions... please wait.", show_alert=False)
-        session_pool.reload_from_env()
-        bot.answer_callback_query(call.id, "✅ Session Health Validation Completed!", show_alert=True)
-        handle_admin_callbacks(types.CallbackQuery(call.id, call.from_user, call.message, call.chat_instance, "admin_sessions_menu"))
         return
 
     if data == "admin_mailing_select":
@@ -971,7 +768,6 @@ def handle_admin_callbacks(call):
             f"⚡ <b>Awaiting Unban (/ub):</b> <code>{ub_count}</code>\n"
             f"🚫 <b>Awaiting Ban (/b):</b> <code>{b_count}</code>\n"
             f"📈 <b>Total Accounts Tracked:</b> <code>{total_tracked:,}</code>\n"
-            f"🔑 <b>Active Sessions Loaded:</b> <code>{len(session_pool.active_sessions)} / {len(session_pool.all_sessions)}</code>\n"
             "💾 <b>Database Engine:</b> <code>Neon Serverless Postgres ⚡</code>\n"
             "🕒 <b>Server Status:</b> <code>Online 24/7 (Render)</code>"
         )
@@ -1305,7 +1101,7 @@ def handle_unban_request(message):
 
     status_data = check_single_account(username)
     
-    # Strict validation: ONLY add if it is genuinely BANNED
+    # Strict Verification: Agar account ACTIVE hai to DENY karo!
     if status_data["status"] == "ACTIVE":
         caption = (
             f"ℹ️ <b>{ig_link}</b> is already active.\n\n"
@@ -1314,9 +1110,10 @@ def handle_unban_request(message):
         send_custom_media(message.chat.id, "deny", caption, reply_to=message.message_id)
         return
     elif status_data["status"] == "UNKNOWN":
-        bot.reply_to(message, f"⚠️ <b>Could not verify {ig_link} right now.</b> Instagram rate limit active. Try again in 20s.")
+        bot.reply_to(message, f"⚠️ <b>Unable to verify {ig_link}.</b> Rate-limit active. Please try in 15 seconds.")
         return
 
+    # Sirf tabhi add hoga jab BANNED confirm ho
     req_time = get_current_time_str()
     req_date = get_current_date_str()
 
@@ -1364,7 +1161,7 @@ def handle_ban_request(message):
 
     status_data = check_single_account(username)
 
-    # Strict validation: ONLY add if it is genuinely ACTIVE
+    # Strict Verification: Agar account BANNED hai to DENY karo!
     if status_data["status"] == "BANNED":
         caption = (
             f"ℹ️ <b>{ig_link}</b> is already banned or unavailable.\n\n"
@@ -1373,9 +1170,10 @@ def handle_ban_request(message):
         send_custom_media(message.chat.id, "deny", caption, reply_to=message.message_id)
         return
     elif status_data["status"] == "UNKNOWN":
-        bot.reply_to(message, f"⚠️ <b>Could not verify {ig_link} right now.</b> Instagram rate limit active. Try again in 20s.")
+        bot.reply_to(message, f"⚠️ <b>Unable to verify {ig_link}.</b> Rate-limit active. Please try in 15 seconds.")
         return
 
+    # Sirf tabhi add hoga jab ACTIVE confirm ho
     req_time = get_current_time_str()
     req_date = get_current_date_str()
 
@@ -1488,5 +1286,5 @@ def run_bot_polling():
 
 if __name__ == "__main__":
     _verify_integrity()
-    print(f"[INIT] Dual Tracker Bot is active. Loaded Sessions: {len(session_pool.active_sessions)}", flush=True)
+    print("[INIT] Dual Tracker Bot is active with GraphQL Core Engine...", flush=True)
     run_bot_polling()
