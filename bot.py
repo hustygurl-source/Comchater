@@ -13,7 +13,7 @@ import telebot
 from telebot import types
 from datetime import datetime, timezone, timedelta
 
-# Dynamic PostgreSQL Driver Fallback (psycopg2 or psycopg)
+# Dynamic PostgreSQL Driver Import
 try:
     import psycopg2
 except ImportError:
@@ -84,14 +84,14 @@ admin_state = {}
 user_message_history = {}
 
 # ----------------- NETWORK EXECUTION ROUTE -----------------
-def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirects=False):
+def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirects=True):
     if PROXIES:
         try:
             r = requests.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=allow_redirects)
             if r.status_code != 429:
                 return r
         except Exception:
-            pass
+            pass  # Fallback to direct connection
     return requests.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
 
 # ----------------- ULTRA-ACCURATE SCRAPER ENGINE -----------------
@@ -103,7 +103,7 @@ def single_request_check(username, session_id=None):
     clean_session = urllib.parse.unquote(session_id.strip()) if session_id else None
     ds_user_id = clean_session.split(":")[0] if clean_session and ":" in clean_session else ""
 
-    # Route 1: Official Web Profile Info API
+    # Route 1: Official Instagram Web Profile Info API (Direct Header Signature)
     api_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "X-IG-App-ID": "936619743392459",
@@ -135,26 +135,36 @@ def single_request_check(username, session_id=None):
     except Exception:
         pass
 
-    # Route 2: Direct HTTP Status Check (404 = BANNED, 200 = ACTIVE)
+    # Route 2: Public Mobile Shared Data Profile Scraper
     try:
-        web_url = f"https://www.instagram.com/{clean_username}/"
-        web_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        prof_url = f"https://www.instagram.com/{clean_username}/"
+        prof_headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
-        r_web = execute_network_request(web_url, headers=web_headers, cookies={}, timeout=6, allow_redirects=False)
+        r_prof = execute_network_request(prof_url, headers=prof_headers, cookies={}, timeout=6, allow_redirects=True)
 
-        if r_web.status_code == 404:
+        if r_prof.status_code in [404, 410]:
             return {"status": "BANNED", "followers": 0, "following": 0}
-        elif r_web.status_code == 200:
-            html = r_web.text
-            if "Page Not Found" in html or "isn't available" in html:
-                return {"status": "BANNED", "followers": 0, "following": 0}
-            return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
+
+        html = r_prof.text
+        if "Page Not Found" in html or "isn't available" in html or "link you followed may be broken" in html:
+            return {"status": "BANNED", "followers": 0, "following": 0}
+
+        if f'content="https://www.instagram.com/{clean_username}/"' in html or \
+           f'"username":"{clean_username}"' in html or \
+           'og:type" content="profile"' in html or \
+           f'@{clean_username}' in html or \
+           f'title="{clean_username}"' in html:
+
+            f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
+            followers = f_match.group(1) if f_match else "N/A"
+            return {"status": "ACTIVE", "followers": followers, "following": "N/A"}
+
     except Exception:
         pass
 
-    # Route 3: Embed Verification
+    # Route 3: Public Embed Validation
     try:
         embed_url = f"https://www.instagram.com/{clean_username}/embed/"
         embed_headers = {
@@ -165,7 +175,7 @@ def single_request_check(username, session_id=None):
         if r_emb.status_code in [404, 410]:
             return {"status": "BANNED", "followers": 0, "following": 0}
         if r_emb.status_code == 200:
-            if "Watch on Instagram" in r_emb.text or "View profile" in r_emb.text:
+            if "Watch on Instagram" in r_emb.text or "View profile" in r_emb.text or f"/{clean_username}/" in r_emb.text:
                 return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
             if "Page Not Found" in r_emb.text or "unavailable" in r_emb.text:
                 return {"status": "BANNED", "followers": 0, "following": 0}
@@ -203,7 +213,7 @@ def test_session_health(session_id):
         elif r.status_code == 403:
             return False, "403 Forbidden"
         
-        return True, "Active (Rate Limited Standby)"
+        return True, "Active (Standby)"
     except Exception:
         return True, "Active (Direct Mode)"
 
@@ -270,7 +280,7 @@ def check_single_account(username):
 def get_db_connection():
     clean_url = DATABASE_URL.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
     if not psycopg2:
-        raise ImportError("No PostgreSQL driver found (neither psycopg2 nor psycopg).")
+        raise ImportError("No PostgreSQL driver found.")
     return psycopg2.connect(clean_url, sslmode="require", connect_timeout=10)
 
 def init_postgres():
