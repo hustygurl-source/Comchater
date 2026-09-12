@@ -1,4 +1,4 @@
-os
+import os
 import sys
 import time
 import json
@@ -83,7 +83,7 @@ def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirec
             if r.status_code != 429:
                 return r
         except Exception:
-            pass  # Fallback to direct connection if proxy errors or rate-limits
+            pass
     return requests.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
 
 # ----------------- ULTRA-ACCURATE SCRAPER ENGINE -----------------
@@ -127,7 +127,7 @@ def single_request_check(username, session_id=None):
     except Exception:
         pass
 
-    # Route 2: Direct HTTP Status Check (No Session Needed, 404 = BANNED, 200 = ACTIVE)
+    # Route 2: Direct HTTP Status Check (404 = BANNED, 200 = ACTIVE)
     try:
         web_url = f"https://www.instagram.com/{clean_username}/"
         web_headers = {
@@ -195,9 +195,8 @@ def test_session_health(session_id):
         elif r.status_code == 403:
             return False, "403 Forbidden"
         
-        # 429 is temporary IP rate limit, session is kept active
         return True, "Active (Rate Limited Standby)"
-    except Exception as e:
+    except Exception:
         return True, "Active (Direct Mode)"
 
 class SessionPool:
@@ -1407,7 +1406,7 @@ def handle_unrecognized_input(message):
             f"Hello {mention}, you must join all our required official channels below to access this bot:\n\n"
             "<i>Click each channel to join, then tap Verify:</i>"
         )
-        send_custom_media(message.chat.id, "force_join", text, reply_to=message.message_id, reply_markup=build_force_join_markup())
+        send_custom_media(chat.id, "force_join", text, reply_to=message.message_id, reply_markup=build_force_join_markup())
         return
 
     mention = get_user_mention(user.id, user.first_name)
@@ -1443,4 +1442,3 @@ if __name__ == "__main__":
     _verify_integrity()
     print("[INIT] Dual Tracker Bot is active with Resilient Multi-Route Engine...", flush=True)
     run_bot_polling()
-
