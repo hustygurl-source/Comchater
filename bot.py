@@ -93,15 +93,15 @@ user_message_history = {}
 # ----------------- NETWORK EXECUTION ROUTE -----------------
 http_session = requests.Session()
 
-def execute_network_request(url, headers, cookies=None, timeout=7, allow_redirects=False):
+def execute_network_request(url, headers, cookies=None, timeout=7):
     if PROXIES:
         try:
-            r = http_session.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=allow_redirects)
+            r = http_session.get(url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=timeout, allow_redirects=False)
             if r.status_code not in [429, 403, 502, 503]:
                 return r
         except Exception:
             pass  # Fallback to direct request
-    return http_session.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=allow_redirects)
+    return http_session.get(url, headers=headers, cookies=cookies, timeout=timeout, allow_redirects=False)
 
 # ----------------- 100% ACCURATE PROFILE CHECK ENGINE -----------------
 def check_single_account(username):
@@ -109,17 +109,16 @@ def check_single_account(username):
     if not clean_username:
         return {"status": "UNKNOWN", "followers": "N/A", "following": "N/A"}
 
-    # Method 1: Official Instagram App User-Info Endpoint (Strict Binary Decision)
+    # Route 1: Instagram Mobile Internal API
     try:
         app_url = f"https://i.instagram.com/api/v1/users/{clean_username}/usernameinfo/"
         app_headers = {
             "User-Agent": "Instagram 315.0.0.38.109 Android (33/13; 420dpi; 1080x2400; Xiaomi; 2201117TI; spes; qcom; en_US; 564998765)",
             "X-IG-App-ID": "936619743392459",
             "Accept-Language": "en-US",
-            "Accept-Encoding": "gzip, deflate",
             "Accept": "*/*"
         }
-        r = execute_network_request(app_url, headers=app_headers, timeout=6, allow_redirects=False)
+        r = execute_network_request(app_url, headers=app_headers, timeout=6)
 
         if r.status_code == 200:
             data = r.json()
@@ -135,7 +134,7 @@ def check_single_account(username):
     except Exception:
         pass
 
-    # Method 2: Web Profile Info API
+    # Route 2: Web Profile Info API
     try:
         api_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={clean_username}"
         web_headers = {
@@ -146,7 +145,7 @@ def check_single_account(username):
             "Accept": "*/*",
             "Referer": f"https://www.instagram.com/{clean_username}/"
         }
-        r2 = execute_network_request(api_url, headers=web_headers, timeout=6, allow_redirects=False)
+        r2 = execute_network_request(api_url, headers=web_headers, timeout=6)
 
         if r2.status_code == 200:
             data2 = r2.json()
@@ -163,24 +162,28 @@ def check_single_account(username):
     except Exception:
         pass
 
-    # Method 3: Embed Header Inspector (Never confuses Login Redirects)
+    # Route 3: Public Shared Direct HTML Verification (Strict Metadata Regex)
     try:
-        embed_url = f"https://www.instagram.com/{clean_username}/embed/"
-        emb_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        url_web = f"https://www.instagram.com/{clean_username}/"
+        headers_web = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
-        r3 = execute_network_request(embed_url, headers=emb_headers, timeout=6, allow_redirects=False)
+        r_web = execute_network_request(url_web, headers=headers_web, timeout=6)
 
-        if r3.status_code in [404, 410]:
+        if r_web.status_code in [404, 410]:
             return {"status": "BANNED", "followers": 0, "following": 0}
 
-        if r3.status_code == 200:
-            text = r3.text
-            if "Page Not Found" in text or "unavailable" in text or "link you followed may be broken" in text:
+        if r_web.status_code == 200:
+            html = r_web.text
+            if "Sorry, this page isn't available" in html or "User not found" in html or "Page Not Found" in html:
                 return {"status": "BANNED", "followers": 0, "following": 0}
-            if "View profile" in text or "Watch on Instagram" in text or 'class="UsernameText"' in text:
-                return {"status": "ACTIVE", "followers": "N/A", "following": "N/A"}
+
+            # Check if actual user profile is loaded
+            if (f'content="https://www.instagram.com/{clean_username}/"' in html or f'@{clean_username}' in html) and 'og:type" content="profile"' in html:
+                f_match = re.search(r'([0-9.,kKmM]+)\s+Followers', html)
+                followers = f_match.group(1) if f_match else "N/A"
+                return {"status": "ACTIVE", "followers": followers, "following": "N/A"}
     except Exception:
         pass
 
@@ -1293,5 +1296,5 @@ def run_bot_polling():
 
 if __name__ == "__main__":
     _verify_integrity()
-    print("[INIT] Dual Tracker Bot is active with App-Native Engine...", flush=True)
+    print("[INIT] Dual Tracker Bot is active with Native UserInfo Engine...", flush=True)
     run_bot_polling()
