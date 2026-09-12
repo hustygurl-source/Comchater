@@ -1,4 +1,4 @@
-Import os
+import os
 import sys
 import time
 import json
@@ -1892,3 +1892,4 @@ def start_safe_polling():
 
 if __name__ == "__main__":
     start_safe_polling()
+
